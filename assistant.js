@@ -35,14 +35,42 @@
   function describeCanvas(s) {
     if (!s.elements.length) return 'The canvas is empty.';
     const byId = new Map(s.elements.map((e) => [e.id, e]));
-    const lines = ['Elements (type, name, position):'];
-    s.elements.forEach((e) => lines.push(`- ${e.typeLabel} ${nameOf(e)} at (${e.x}, ${e.y})`));
-    lines.push('', 'Connections:');
+    const isStructural = (e) => /entity$|relationship$|^isa$/.test(e.type);
     const links = s.connections
-      .map((c) => [byId.get(c.from), byId.get(c.to), c])
-      .filter(([a, b]) => a && b)
-      .map(([a, b, c]) => `- ${nameOf(a)} (${a.typeLabel}) — ${nameOf(b)} (${b.typeLabel})${c.label ? ` [${c.label}]` : ''}`);
-    lines.push(...(links.length ? links : ['(none)']));
+      .map((c) => ({ a: byId.get(c.from), b: byId.get(c.to), label: c.label }))
+      .filter((l) => l.a && l.b);
+
+    const attrText = (e) => {
+      const mark = { 'key-attribute': '*', 'multivalued-attribute': '+', 'derived-attribute': '~' };
+      return `${mark[e.type] || ''}${e.label || '(unnamed)'}`;
+    };
+    const attrsOf = (owner) => links
+      .filter((l) => l.a === owner || l.b === owner)
+      .map((l) => (l.a === owner ? l.b : l.a))
+      .filter((n) => !isStructural(n));
+
+    const lines = ['Elements (attributes are marked: * key, + multivalued, ~ derived):'];
+    s.elements.filter(isStructural).forEach((e) => {
+      const attrs = attrsOf(e).map(attrText);
+      let line = `- ${e.typeLabel} ${nameOf(e)}`;
+      if (/relationship$|^isa$/.test(e.type)) {
+        const ends = links
+          .filter((l) => (l.a === e && isStructural(l.b)) || (l.b === e && isStructural(l.a)))
+          .map((l) => `${nameOf(l.a === e ? l.b : l.a)}${l.label ? ` [${l.label}]` : ''}`);
+        line += ` connects ${ends.length ? ends.join(', ') : '(nothing yet)'}`;
+      }
+      line += attrs.length ? `; attributes: ${attrs.join(', ')}` : '';
+      lines.push(line);
+    });
+
+    const loose = s.elements.filter((e) => !isStructural(e) && !links.some((l) => l.a === e || l.b === e));
+    if (loose.length) lines.push('', `Unattached attributes: ${loose.map(attrText).join(', ')}`);
+
+    const direct = links.filter((l) => isStructural(l.a) && isStructural(l.b) && !/relationship$|^isa$/.test(l.a.type) && !/relationship$|^isa$/.test(l.b.type));
+    if (direct.length) {
+      lines.push('', 'Direct links between entities:', ...direct.map((l) => `- ${nameOf(l.a)} — ${nameOf(l.b)}${l.label ? ` [${l.label}]` : ''}`));
+    }
+    lines.push('', `Totals: ${s.elements.length} elements, ${s.connections.length} connections.`);
     return lines.join('\n');
   }
 
@@ -206,13 +234,13 @@
 
   /* ---------- Diagram blocks ---------- */
 
-  // The model builds diagrams by writing a ```er-diagram JSON block. We apply it to the canvas the
-  // moment the block is complete (even while the rest of the reply is still streaming).
+  // The model builds diagrams by writing an ```er-diagram JSON block. Elements are added to the
+  // canvas as soon as each one finishes streaming, so the diagram grows while the reply is typed.
   const BLOCK_RE = /```er-diagram[^\n]*\n([\s\S]*?)(```|$)/g;
   let changeCounter = 0;
   window.addEventListener('diagram:change', () => {
     changeCounter++;
-    messages.forEach((m) => { if (m.blocks?.some((b) => b.status === 'applied')) paint(m, true); });
+    messages.forEach((m) => { if (!m.processing && m.blocks?.some((b) => b?.status === 'applied')) paint(m, true); });
   });
 
   function extractBlocks(text) {
@@ -226,16 +254,42 @@
     return blocks;
   }
 
-  function parseSpec(body) {
-    let src = body.trim();
-    const first = src.indexOf('{');
-    const last = src.lastIndexOf('}');
-    if (first === -1 || last === -1) throw new Error('No JSON object found.');
-    src = src.slice(first, last + 1)
+  function lenientParse(text) {
+    const src = text
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/^\s*\/\/.*$/gm, '')
       .replace(/,\s*([}\]])/g, '$1');
     return JSON.parse(src);
+  }
+
+  // Complete top-level items ({...} or [...]) of the array under `key`, even if the JSON is still streaming.
+  function scanItems(text, key) {
+    const open = new RegExp(`"${key}"\\s*:\\s*\\[`).exec(text);
+    if (!open) return [];
+    const items = [];
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escaped = false;
+    for (let i = open.index + open[0].length; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') { inString = true; continue; }
+      if (ch === '{' || ch === '[') {
+        if (depth === 0) start = i;
+        depth++;
+      } else if (ch === '}' || ch === ']') {
+        if (depth === 0) return items;
+        depth--;
+        if (depth === 0) items.push(text.slice(start, i + 1));
+      }
+    }
+    return items;
   }
 
   function summarize(report) {
@@ -245,44 +299,82 @@
     if (report.connected) parts.push(`${report.connected} connection${report.connected === 1 ? '' : 's'}`);
     if (report.renamed) parts.push(`${report.renamed} renamed`);
     if (report.removed) parts.push(`${report.removed} removed`);
+    if (report.disconnected) parts.push(`${report.disconnected} disconnected`);
     return parts.join(' · ') || 'No changes';
   }
 
-  // Apply every completed block exactly once.
-  function processBlocks(m) {
-    m.blocks = m.blocks || [];
-    extractBlocks(m.text).forEach((block, i) => {
-      if (!block.complete || m.blocks[i]) return;
-      try {
-        const report = window.ERDiagram.apply(parseSpec(block.body));
-        m.blocks[i] = { status: 'applied', report, version: changeCounter };
-        lastSent = snap();
-        updateChip();
-      } catch (err) {
-        m.blocks[i] = { status: 'error', error: err.message };
-      }
+  function feed(st, items, done, add) {
+    const batch = [];
+    items.slice(done).forEach((text) => {
+      try { batch.push(lenientParse(text)); } catch { st.skipped = (st.skipped || 0) + 1; }
     });
+    if (batch.length) add(batch);
+    return items.length;
+  }
+
+  // Advance every diagram block in the message: build what has arrived, finish blocks that ended.
+  function processBlocks(m, final = false) {
+    if (m.processing) return;
+    m.processing = true;
+    try {
+      m.blocks = m.blocks || [];
+      extractBlocks(m.text).forEach((block, i) => {
+        let st = m.blocks[i];
+        if (st && st.status !== 'building') return;
+        if (!st) st = m.blocks[i] = { status: 'building', session: null, nodes: 0, edges: 0 };
+
+        const nodeItems = scanItems(block.body, 'nodes');
+        const edgeItems = scanItems(block.body, 'edges');
+        const ending = block.complete || final;
+
+        if (!st.session && (nodeItems.length || edgeItems.length || ending)) {
+          st.session = window.ERDiagram.beginSpec({ replace: /"mode"\s*:\s*"replace"/.test(block.body) });
+        }
+        if (!st.session) return;
+        st.nodes = feed(st, nodeItems, st.nodes, (batch) => st.session.addNodes(batch));
+        st.edges = feed(st, edgeItems, st.edges, (batch) => st.session.addEdges(batch));
+
+        if (!ending) return;
+        let ops = {};
+        try { ops = lenientParse(block.body.slice(block.body.indexOf('{'), block.body.lastIndexOf('}') + 1)); } catch { /* use the streamed items only */ }
+        st.status = 'finishing';
+        st.report = st.session.finish(ops, () => {
+          st.status = 'applied';
+          st.version = changeCounter;
+          lastSent = snap();
+          updateChip();
+          paint(m, true);
+        });
+        if (!st.report.added && !st.report.connected && !st.report.renamed && !st.report.removed && !st.report.disconnected && !st.report.replaced) {
+          st.status = 'error';
+          st.error = 'The reply did not contain any usable diagram changes';
+        }
+      });
+    } finally {
+      m.processing = false;
+    }
   }
 
   function cardHtml(m, block, index) {
-    const state = m.blocks?.[index];
-    const icon = (name) => ICON(name);
-    if (!block.complete) {
-      const count = (block.body.match(/"label"/g) || []).length;
-      return `<div class="er-card"><span class="er-card-icon"><span class="spinner"></span></span><div class="er-card-text"><strong>Designing on your canvas…</strong><span>${count ? `${count} elements so far` : 'Planning the layout'}</span></div></div>`;
+    const st = m.blocks?.[index];
+    if (!st || st.status === 'building' || st.status === 'finishing') {
+      const r = st?.session?.report;
+      const detail = r && (r.added || r.connected) ? `${r.added} elements · ${r.connected} connections so far` : 'Planning the layout';
+      const title = st?.status === 'finishing' ? 'Tidying the layout…' : 'Designing on your canvas…';
+      return `<div class="er-card"><span class="er-card-icon"><span class="spinner"></span></span><div class="er-card-text"><strong>${title}</strong><span>${detail}</span></div></div>`;
     }
-    if (!state) return '';
-    if (state.status === 'error') {
-      return `<div class="er-card error"><span class="er-card-icon">${icon('x')}</span><div class="er-card-text"><strong>Couldn't build that diagram</strong><span>${esc(state.error)}. Ask me to try again.</span></div></div>`;
+    if (st.status === 'error') {
+      return `<div class="er-card error"><span class="er-card-icon">${ICON('x')}</span><div class="er-card-text"><strong>Couldn't build that diagram</strong><span>${esc(st.error)}. Ask me to try again.</span></div></div>`;
     }
-    if (state.status === 'undone') {
-      return `<div class="er-card"><span class="er-card-icon">${icon('undo')}</span><div class="er-card-text"><strong>Diagram changes undone</strong></div></div>`;
+    if (st.status === 'undone') {
+      return `<div class="er-card"><span class="er-card-icon">${ICON('undo')}</span><div class="er-card-text"><strong>Diagram changes undone</strong></div></div>`;
     }
-    const note = state.report.warnings.length ? `${summarize(state.report)} · ${state.report.warnings.length} skipped` : summarize(state.report);
-    const undoable = state.version === changeCounter;
-    return `<div class="er-card done"><span class="er-card-icon">${icon('wand')}</span><div class="er-card-text"><strong>Diagram updated</strong><span>${esc(note)}</span></div>` +
+    const skipped = st.report.warnings.length + (st.skipped || 0);
+    const note = skipped ? `${summarize(st.report)} · ${skipped} skipped` : summarize(st.report);
+    const undoable = st.version === changeCounter;
+    return `<div class="er-card done"><span class="er-card-icon">${ICON('wand')}</span><div class="er-card-text"><strong>Diagram updated</strong><span>${esc(note)}</span></div>` +
       '<div class="er-card-actions">' +
-      `<button type="button" class="btn ghost" data-er-fit>Fit view</button>` +
+      '<button type="button" class="btn ghost" data-er-fit>Fit view</button>' +
       (undoable ? `<button type="button" class="btn ghost" data-er-undo="${index}">Undo</button>` : '') + '</div></div>';
   }
 
@@ -324,7 +416,7 @@
 
   function paint(m, quiet) {
     if (m.role !== 'assistant') return;
-    processBlocks(m);
+    if (!quiet || m.status === 'streaming') processBlocks(m);
     const body = m.bodyEl;
     if (m.status === 'streaming' && !m.text) {
       body.innerHTML = '<span class="typing" aria-label="Thinking"><i></i><i></i><i></i></span>';
@@ -572,6 +664,7 @@
       m.status = 'done';
       m.el.classList.remove('streaming');
       if (!m.text.trim()) m.text = '*(No response. Try rephrasing.)*';
+      processBlocks(m, true);
       paint(m);
       addActions(m);
     } catch (err) {
@@ -579,6 +672,7 @@
         if (m.text.trim()) {
           m.status = 'done';
           m.el.classList.remove('streaming');
+          processBlocks(m, true);
           paint(m);
           addActions(m);
         } else {
@@ -586,6 +680,7 @@
         }
       } else {
         const offline = err instanceof TypeError;
+        if (m.text) processBlocks(m, true);
         showError(m, offline ? "Couldn't reach the assistant. Check your connection and try again." : err.message);
       }
     } finally {

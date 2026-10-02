@@ -264,26 +264,79 @@ function zoomCenter(factor) {
   zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, factor);
 }
 
-function fitView() {
-  const items = Array.from(state.elements.values());
-  if (!items.length) {
-    view.x = 0;
-    view.y = 0;
-    view.z = 1;
+let viewTween = 0;
+function tweenView(target, ms) {
+  const token = ++viewTween;
+  const from = { ...view };
+  const t0 = performance.now();
+  const step = (now) => {
+    if (token !== viewTween) return;
+    const k = Math.min(1, (now - t0) / ms);
+    const e = 1 - Math.pow(1 - k, 3);
+    view.x = from.x + (target.x - from.x) * e;
+    view.y = from.y + (target.y - from.y) * e;
+    view.z = from.z + (target.z - from.z) * e;
     applyView();
-    return;
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// Fit everything in view. `overrides` maps id -> {x, y} for positions the elements are about to move to.
+function fitView(animate = false, overrides = null) {
+  const items = Array.from(state.elements.values());
+  let target;
+  if (!items.length) {
+    target = { x: 0, y: 0, z: 1 };
+  } else {
+    const pos = (i) => overrides?.get(i.id) || i;
+    const minX = Math.min(...items.map((i) => pos(i).x));
+    const minY = Math.min(...items.map((i) => pos(i).y));
+    const maxX = Math.max(...items.map((i) => pos(i).x + i.el.offsetWidth));
+    const maxY = Math.max(...items.map((i) => pos(i).y + i.el.offsetHeight));
+    const availW = canvas.clientWidth - 64;
+    const availH = canvas.clientHeight - 130; // leave room for the toolbar
+    const z = Math.min(1, Math.max(MIN_ZOOM, Math.min(availW / (maxX - minX), availH / (maxY - minY))));
+    target = {
+      z,
+      x: (canvas.clientWidth - (maxX - minX) * z) / 2 - minX * z,
+      y: (availH + 40 - (maxY - minY) * z) / 2 - minY * z + 8,
+    };
   }
-  const minX = Math.min(...items.map((i) => i.x));
-  const minY = Math.min(...items.map((i) => i.y));
-  const maxX = Math.max(...items.map((i) => i.x + i.el.offsetWidth));
-  const maxY = Math.max(...items.map((i) => i.y + i.el.offsetHeight));
-  const availW = canvas.clientWidth - 64;
-  const availH = canvas.clientHeight - 130; // leave room for the toolbar
-  const z = Math.min(1, Math.max(MIN_ZOOM, Math.min(availW / (maxX - minX), availH / (maxY - minY))));
-  view.z = z;
-  view.x = (canvas.clientWidth - (maxX - minX) * z) / 2 - minX * z;
-  view.y = (availH + 40 - (maxY - minY) * z) / 2 - minY * z + 8;
-  applyView();
+  if (animate) {
+    tweenView(target, 450);
+  } else {
+    viewTween++;
+    Object.assign(view, target);
+    applyView();
+  }
+}
+
+// Smoothly move elements to new world positions; `done` runs once they have arrived.
+function tweenPositions(targets, ms, done) {
+  const starts = new Map();
+  targets.forEach((_, id) => {
+    const item = state.elements.get(id);
+    if (item) starts.set(id, { x: item.x, y: item.y });
+  });
+  const t0 = performance.now();
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / ms);
+    const e = 1 - Math.pow(1 - k, 3);
+    starts.forEach((from, id) => {
+      const item = state.elements.get(id);
+      if (!item) return;
+      const to = targets.get(id);
+      item.x = k === 1 ? to.x : from.x + (to.x - from.x) * e;
+      item.y = k === 1 ? to.y : from.y + (to.y - from.y) * e;
+      item.el.style.left = `${item.x}px`;
+      item.el.style.top = `${item.y}px`;
+    });
+    drawConnections();
+    if (k < 1) requestAnimationFrame(step);
+    else done?.();
+  };
+  requestAnimationFrame(step);
 }
 
 /* ---------- Selection & inspector ---------- */
@@ -743,10 +796,14 @@ function drawConnections() {
 
 function addConnection(fromId, toId, label = '') {
   if (!fromId || !toId || fromId === toId) return false;
-  const exists = state.connections.some(
+  const existing = state.connections.find(
     (c) => (c.from === fromId && c.to === toId) || (c.from === toId && c.to === fromId)
   );
-  if (exists) return false;
+  if (existing) {
+    // Repeating a link with a new cardinality updates the label.
+    if (label && existing.label !== String(label).slice(0, 12)) existing.label = String(label).slice(0, 12);
+    return false;
+  }
   const connection = { id: `connection-${connectionCounter++}`, from: fromId, to: toId };
   if (label) connection.label = String(label).slice(0, 12);
   state.connections.push(connection);
@@ -901,6 +958,8 @@ const TYPE_ALIASES = {
   'isa': 'isa', 'generalization': 'isa', 'specialization': 'isa', 'inheritance': 'isa',
   'associative-entity': 'associative-entity', 'associative': 'associative-entity',
 };
+const STRUCTURAL = new Set(['entity', 'weak-entity', 'relationship', 'identifying-relationship', 'associative-entity', 'isa']);
+const ENTITY_LIKE = new Set(['entity', 'weak-entity', 'associative-entity']);
 
 function normalizeType(raw) {
   return TYPE_ALIASES[String(raw || '').trim().toLowerCase().replace(/[\s_]+/g, '-')] || null;
@@ -919,125 +978,217 @@ function parseAttr(raw) {
 
 const norm = (s) => String(s || '').trim().toLowerCase();
 
-// Apply an AI-written diagram spec in one undoable step. New elements are laid out automatically
-// around the existing ones, which never move.
-function applySpec(spec) {
-  const report = { added: 0, connected: 0, renamed: 0, removed: 0, replaced: false, warnings: [] };
-  if (!spec || typeof spec !== 'object') throw new Error('The diagram spec was empty.');
+function neighboursOf(id) {
+  return state.connections
+    .filter((c) => c.from === id || c.to === id)
+    .map((c) => state.elements.get(c.from === id ? c.to : c.from))
+    .filter(Boolean);
+}
 
-  if (spec.mode === 'replace') {
+// Find an element by label, or an attribute by "Owner.attribute".
+function findByName(name, types = null) {
+  const target = norm(name);
+  const items = Array.from(state.elements.values());
+  const direct = items.find((i) => norm(i.label) === target && (!types || types.has(i.type)));
+  if (direct || !target.includes('.')) return direct;
+  const dot = target.indexOf('.');
+  const owner = items.find((i) => norm(i.label) === target.slice(0, dot) && STRUCTURAL.has(i.type));
+  if (!owner) return undefined;
+  return neighboursOf(owner.id).find((n) => !STRUCTURAL.has(n.type) && norm(n.label) === target.slice(dot + 1));
+}
+
+// A spec is applied through a session so the AI's reply can build the diagram while it streams:
+// nodes appear as soon as they arrive, then finish() tidies the whole thing into a clean layout.
+function createSpecSession({ replace = false } = {}) {
+  const report = { added: 0, connected: 0, renamed: 0, removed: 0, disconnected: 0, replaced: false, warnings: [] };
+  if (replace) {
     clearCanvas();
     report.replaced = true;
   }
-
-  const findExisting = (name, types) => {
-    const target = norm(name);
-    return Array.from(state.elements.values()).find((i) => norm(i.label) === target && (!types || types.has(i.type)));
-  };
-
-  (Array.isArray(spec.rename) ? spec.rename : []).forEach((r) => {
-    const item = findExisting(r?.target ?? r?.from);
-    const next = String(r?.label ?? r?.to ?? '').trim();
-    if (!item || !next) { report.warnings.push(`Could not rename "${r?.target ?? r?.from}".`); return; }
-    item.label = next;
-    item.labelEl.textContent = next;
-    report.renamed++;
-  });
-
-  (Array.isArray(spec.remove) ? spec.remove : []).forEach((name) => {
-    const item = findExisting(name);
-    if (!item) { report.warnings.push(`Could not find "${name}" to remove.`); return; }
-    removeNode(item.id);
-    report.removed++;
-  });
-
   const refs = new Map(); // spec id -> element id
-  const fresh = []; // { ref, type, label }
-  const freshEdges = [];
-  const NON_ATTR = new Set(['entity', 'weak-entity', 'relationship', 'identifying-relationship', 'associative-entity', 'isa']);
+  const created = new Set();
+  let pending = []; // edges waiting for both ends
+  let fitQueued = false;
 
-  (Array.isArray(spec.nodes) ? spec.nodes : []).forEach((raw, index) => {
-    const type = normalizeType(raw?.type);
-    const label = String(raw?.label ?? raw?.name ?? '').trim();
-    if (!type || !label) { report.warnings.push(`Skipped node #${index + 1}: needs a valid type and label.`); return; }
-    const ref = String(raw.id ?? label);
-
-    // Re-using a name that is already on the canvas links to it instead of duplicating it.
-    const existing = NON_ATTR.has(type) ? findExisting(label, new Set([type, ...(type.endsWith('entity') ? ['entity', 'weak-entity', 'associative-entity'] : [])])) : null;
-    let ownerId;
-    if (existing) {
-      refs.set(ref, existing.id);
-      ownerId = existing.id;
-    } else {
-      ownerId = `new:${ref}`;
-      refs.set(ref, ownerId);
-      fresh.push({ ref: ownerId, type, label });
-    }
-
-    (Array.isArray(raw.attrs) ? raw.attrs : []).forEach((a, i) => {
-      const attr = parseAttr(a);
-      if (!attr || !attr.label) return;
-      if (existing) {
-        const dup = state.connections.some((c) => {
-          const other = state.elements.get(c.from === existing.id ? c.to : c.to === existing.id ? c.from : null);
-          return other && !NON_ATTR.has(other.type) && norm(other.label) === norm(attr.label);
-        });
-        if (dup) return;
-      }
-      const attrRef = `new:${ref}.attr${i}`;
-      fresh.push({ ref: attrRef, type: attr.type, label: attr.label });
-      freshEdges.push({ from: ownerId, to: attrRef });
-    });
-  });
+  const queueFit = () => {
+    if (fitQueued) return;
+    fitQueued = true;
+    requestAnimationFrame(() => { fitQueued = false; fitView(true); });
+  };
 
   const resolve = (name) => {
     const key = String(name);
     if (refs.has(key)) return refs.get(key);
-    const item = findExisting(key);
-    if (item) return item.id;
-    report.warnings.push(`Unknown element "${key}" in a connection.`);
-    return null;
+    return findByName(key)?.id || null;
   };
-  (Array.isArray(spec.edges) ? spec.edges : []).forEach((edge) => {
-    const from = Array.isArray(edge) ? edge[0] : edge?.from;
-    const to = Array.isArray(edge) ? edge[1] : edge?.to;
-    const label = Array.isArray(edge) ? edge[2] : edge?.label;
-    const a = resolve(from);
-    const b = resolve(to);
-    if (a && b && a !== b) freshEdges.push({ from: a, to: b, label });
-  });
 
-  // Layout: existing elements stay where they are, new ones are placed around them.
-  const layoutNodes = [
-    ...Array.from(state.elements.values()).map((i) => ({
-      id: i.id, type: i.type, label: i.label, x: i.x, y: i.y, w: i.el.offsetWidth, h: i.el.offsetHeight, pinned: true,
-    })),
-    ...fresh.map((f) => ({ id: f.ref, type: f.type, label: f.label })),
-  ];
-  const layoutEdges = [
-    ...state.connections.map((c) => ({ from: c.from, to: c.to })),
-    ...freshEdges.map((e) => ({ from: e.from, to: e.to })),
-  ];
-  const positions = window.ERLayout.layout(layoutNodes, layoutEdges);
+  const flush = () => {
+    pending = pending.filter((e) => {
+      const a = resolve(e.from);
+      const b = resolve(e.to);
+      if (!a || !b) return true;
+      if (addConnection(a, b, e.label)) report.connected++;
+      return false;
+    });
+  };
 
-  const created = new Map();
-  fresh.forEach((f) => {
-    const pos = positions.get(f.ref);
-    created.set(f.ref, createElement({ type: f.type, x: pos.x, y: pos.y, label: f.label, silent: true }));
-    report.added++;
-  });
-  const real = (id) => created.get(id) || id;
-  freshEdges.forEach((e) => { if (addConnection(real(e.from), real(e.to), e.label)) report.connected++; });
+  function addNodes(rawNodes) {
+    const fresh = [];
+    const attrEdges = [];
 
-  state.selectedId = null;
-  state.selectedConnectionId = null;
-  refreshInspector();
-  renderConnections();
-  updateEmptyState();
-  saveState();
-  emit('diagram:selection');
-  if (report.added || report.replaced) requestAnimationFrame(() => requestAnimationFrame(fitView));
-  return report;
+    rawNodes.forEach((raw, index) => {
+      const type = normalizeType(raw?.type);
+      const label = String(raw?.label ?? raw?.name ?? '').trim();
+      if (!type || !label) { report.warnings.push(`Skipped node #${index + 1}: needs a valid type and label.`); return; }
+      const ref = String(raw.id ?? label);
+
+      // A name already on the canvas is reused (and gets the new attributes) instead of duplicated.
+      const existing = STRUCTURAL.has(type)
+        ? findByName(label, ENTITY_LIKE.has(type) ? ENTITY_LIKE : new Set([type]))
+        : null;
+      let ownerRef;
+      if (existing) {
+        refs.set(ref, existing.id);
+        ownerRef = existing.id;
+      } else {
+        ownerRef = `new:${ref}:${fresh.length}`;
+        fresh.push({ key: ownerRef, ref, type, label });
+      }
+
+      (Array.isArray(raw.attrs) ? raw.attrs : []).forEach((a, i) => {
+        const attr = parseAttr(a);
+        if (!attr || !attr.label) return;
+        if (existing) {
+          const dup = neighboursOf(existing.id).some((n) => !STRUCTURAL.has(n.type) && norm(n.label) === norm(attr.label));
+          if (dup) return;
+        }
+        const key = `${ownerRef}.attr${i}`;
+        fresh.push({ key, type: attr.type, label: attr.label });
+        attrEdges.push({ from: ownerRef, to: key });
+      });
+    });
+
+    if (fresh.length) {
+      const layoutNodes = [
+        ...Array.from(state.elements.values()).map((i) => ({
+          id: i.id, type: i.type, label: i.label, x: i.x, y: i.y, w: i.el.offsetWidth, h: i.el.offsetHeight, pinned: true,
+        })),
+        ...fresh.map((f) => ({ id: f.key, type: f.type, label: f.label })),
+      ];
+      const layoutEdges = [
+        ...state.connections.map((c) => ({ from: c.from, to: c.to })),
+        ...attrEdges,
+        ...pending.map((e) => ({ from: resolve(e.from) || e.from, to: resolve(e.to) || e.to })),
+      ];
+      const positions = window.ERLayout.layout(layoutNodes, layoutEdges);
+
+      const real = new Map();
+      fresh.forEach((f) => {
+        const pos = positions.get(f.key);
+        const id = createElement({ type: f.type, x: pos.x, y: pos.y, label: f.label, silent: true });
+        state.elements.get(id).el.classList.add('pop');
+        real.set(f.key, id);
+        created.add(id);
+        if (f.ref !== undefined) refs.set(f.ref, id);
+        report.added++;
+      });
+      attrEdges.forEach((e) => {
+        if (addConnection(real.get(e.from) || e.from, real.get(e.to) || e.to)) report.connected++;
+      });
+    }
+    flush();
+    renderConnections();
+    updateEmptyState();
+    emit('diagram:change');
+    queueFit();
+  }
+
+  function addEdges(rawEdges) {
+    rawEdges.forEach((edge) => {
+      const from = Array.isArray(edge) ? edge[0] : edge?.from;
+      const to = Array.isArray(edge) ? edge[1] : edge?.to;
+      const label = Array.isArray(edge) ? edge[2] : edge?.label;
+      if (from == null || to == null) { report.warnings.push('Skipped a malformed connection.'); return; }
+      pending.push({ from, to, label });
+    });
+    flush();
+    renderConnections();
+    emit('diagram:change');
+  }
+
+  // Apply the remaining operations, tidy the layout of everything this session created, and record
+  // one undo step. `onSettled` fires once the tidy-up animation has finished.
+  function finish(ops = {}, onSettled) {
+    (Array.isArray(ops.rename) ? ops.rename : []).forEach((r) => {
+      const item = findByName(r?.target ?? r?.from);
+      const next = String(r?.label ?? r?.to ?? '').trim();
+      if (!item || !next) { report.warnings.push(`Could not rename "${r?.target ?? r?.from}".`); return; }
+      item.label = next;
+      item.labelEl.textContent = next;
+      report.renamed++;
+    });
+    (Array.isArray(ops.disconnect) ? ops.disconnect : []).forEach((pair) => {
+      const a = Array.isArray(pair) ? resolve(pair[0]) : null;
+      const b = Array.isArray(pair) ? resolve(pair[1]) : null;
+      const before = state.connections.length;
+      state.connections = state.connections.filter((c) => !((c.from === a && c.to === b) || (c.from === b && c.to === a)));
+      if (state.connections.length < before) report.disconnected++;
+      else report.warnings.push('Could not find a connection to remove.');
+    });
+    (Array.isArray(ops.remove) ? ops.remove : []).forEach((name) => {
+      const item = findByName(name);
+      if (!item) { report.warnings.push(`Could not find "${name}" to remove.`); return; }
+      // Removing an entity or relationship takes its attributes with it.
+      const owned = STRUCTURAL.has(item.type) ? neighboursOf(item.id).filter((n) => !STRUCTURAL.has(n.type)) : [];
+      owned.forEach((n) => removeNode(n.id));
+      removeNode(item.id);
+      report.removed++;
+    });
+    flush();
+    pending.forEach((e) => report.warnings.push(`Skipped a connection to an unknown element ("${!resolve(e.from) ? e.from : e.to}").`));
+    pending = [];
+    state.selectedId = null;
+    state.selectedConnectionId = null;
+    refreshInspector();
+    updateEmptyState();
+
+    const settle = () => {
+      saveState();
+      emit('diagram:selection');
+      onSettled?.();
+    };
+
+    const live = Array.from(created).filter((id) => state.elements.has(id));
+    if (live.length > 1) {
+      const layoutNodes = Array.from(state.elements.values()).map((i) => ({
+        id: i.id, type: i.type, label: i.label, x: i.x, y: i.y, w: i.el.offsetWidth, h: i.el.offsetHeight, pinned: !created.has(i.id),
+      }));
+      const positions = window.ERLayout.layout(layoutNodes, state.connections.map((c) => ({ from: c.from, to: c.to })));
+      const moves = new Map(live.map((id) => [id, positions.get(id)]));
+      fitView(true, moves);
+      tweenPositions(moves, 650, () => {
+        state.elements.forEach((i) => i.el.classList.remove('pop'));
+        renderConnections();
+        settle();
+      });
+    } else {
+      renderConnections();
+      if (created.size) fitView(true);
+      settle();
+    }
+    return report;
+  }
+
+  return { report, addNodes, addEdges, finish };
+}
+
+// One-shot helper: apply a complete spec object.
+function applySpec(spec) {
+  if (!spec || typeof spec !== 'object') throw new Error('The diagram spec was empty.');
+  const session = createSpecSession({ replace: spec.mode === 'replace' });
+  session.addNodes(Array.isArray(spec.nodes) ? spec.nodes : []);
+  session.addEdges(Array.isArray(spec.edges) ? spec.edges : []);
+  return session.finish(spec);
 }
 
 /* ---------- Palette drag & click ---------- */
@@ -1176,7 +1327,7 @@ undoBtn.addEventListener('click', undo);
 redoBtn.addEventListener('click', redo);
 zoomInBtn.addEventListener('click', () => zoomCenter(1.25));
 zoomOutBtn.addEventListener('click', () => zoomCenter(0.8));
-zoomFitBtn.addEventListener('click', fitView);
+zoomFitBtn.addEventListener('click', () => fitView(true));
 themeToggle.addEventListener('click', () => {
   setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
 });
@@ -1205,7 +1356,7 @@ window.addEventListener('keydown', (e) => {
   } else if (!mod && !e.altKey && e.key.toLowerCase() === 'c') {
     setMode('connect');
   } else if (!mod && !e.altKey && e.key.toLowerCase() === 'f') {
-    fitView();
+    fitView(true);
   }
 });
 
@@ -1216,8 +1367,9 @@ window.addEventListener('resize', renderConnections);
 window.ERDiagram = {
   typeLabels,
   apply: applySpec,
+  beginSpec: createSpecSession,
   undo,
-  fit: fitView,
+  fit: (animate = true) => fitView(animate),
   getSnapshot() {
     return {
       elements: Array.from(state.elements.values()).map((item) => ({
