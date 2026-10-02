@@ -25,6 +25,7 @@ const files = {
   '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/assistant.js': ['assistant.js', 'text/javascript; charset=utf-8'],
+  '/layout.js': ['layout.js', 'text/javascript; charset=utf-8'],
 };
 
 http.createServer(async (req, res) => {

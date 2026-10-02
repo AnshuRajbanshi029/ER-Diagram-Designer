@@ -38,6 +38,8 @@ netlify deploy --prod
 - Rate limit: 5 requests per minute per IP, enforced by Netlify (`rateLimit` in `netlify/edge-functions/chat.js`) and again in code. Over the limit returns HTTP 429.
 - Same-origin requests only, an allowlist of models, and capped message and image sizes.
 
-## How the assistant sees your work
+## How the assistant works
 
-On every message the app sends the current canvas (elements, names, positions, connections, selection) plus a list of what changed since your previous message (added, removed, renamed, moved, connected). Images are resized in the browser before upload.
+- **It sees your canvas.** Every message includes the current diagram (elements, names, positions, connections, cardinalities, selection) plus what changed since your previous message. Images are resized in the browser before upload.
+- **It builds on your canvas.** Ask it to design, extend, fix or rename things and it replies with a structured diagram block (` ```er-diagram `). The app applies it as soon as the block finishes streaming, lays new elements out automatically (`layout.js`), never moves what you already placed, and shows a card with **Undo** and **Fit view**. One Undo reverts the whole change.
+- **Canvas navigation.** Drag empty space to pan, Ctrl/Cmd + wheel to zoom, `F` or the fit button to fit the diagram. Click a connection to edit its cardinality (1, N, M).

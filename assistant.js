@@ -41,9 +41,9 @@
     s.elements.forEach((e) => lines.push(`- ${e.typeLabel} ${nameOf(e)} at (${e.x}, ${e.y})`));
     lines.push('', 'Connections:');
     const links = s.connections
-      .map((c) => [byId.get(c.from), byId.get(c.to)])
+      .map((c) => [byId.get(c.from), byId.get(c.to), c])
       .filter(([a, b]) => a && b)
-      .map(([a, b]) => `- ${nameOf(a)} (${a.typeLabel}) — ${nameOf(b)} (${b.typeLabel})`);
+      .map(([a, b, c]) => `- ${nameOf(a)} (${a.typeLabel}) — ${nameOf(b)} (${b.typeLabel})${c.label ? ` [${c.label}]` : ''}`);
     lines.push(...(links.length ? links : ['(none)']));
     return lines.join('\n');
   }
@@ -206,6 +206,105 @@
     return out.join('');
   }
 
+  /* ---------- Diagram blocks ---------- */
+
+  // The model builds diagrams by writing a ```er-diagram JSON block. We apply it to the canvas the
+  // moment the block is complete (even while the rest of the reply is still streaming).
+  const BLOCK_RE = /```er-diagram[^\n]*\n([\s\S]*?)(```|$)/g;
+  let changeCounter = 0;
+  window.addEventListener('diagram:change', () => {
+    changeCounter++;
+    messages.forEach((m) => { if (m.blocks?.some((b) => b.status === 'applied')) paint(m, true); });
+  });
+
+  function extractBlocks(text) {
+    const blocks = [];
+    let match;
+    BLOCK_RE.lastIndex = 0;
+    while ((match = BLOCK_RE.exec(text))) {
+      blocks.push({ start: match.index, end: match.index + match[0].length, body: match[1], complete: match[2] === '```' });
+      if (match[2] !== '```') break;
+    }
+    return blocks;
+  }
+
+  function parseSpec(body) {
+    let src = body.trim();
+    const first = src.indexOf('{');
+    const last = src.lastIndexOf('}');
+    if (first === -1 || last === -1) throw new Error('No JSON object found.');
+    src = src.slice(first, last + 1)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+      .replace(/,\s*([}\]])/g, '$1');
+    return JSON.parse(src);
+  }
+
+  function summarize(report) {
+    const parts = [];
+    if (report.replaced) parts.push('new diagram');
+    if (report.added) parts.push(`${report.added} element${report.added === 1 ? '' : 's'} added`);
+    if (report.connected) parts.push(`${report.connected} connection${report.connected === 1 ? '' : 's'}`);
+    if (report.renamed) parts.push(`${report.renamed} renamed`);
+    if (report.removed) parts.push(`${report.removed} removed`);
+    return parts.join(' · ') || 'No changes';
+  }
+
+  // Apply every completed block exactly once.
+  function processBlocks(m) {
+    m.blocks = m.blocks || [];
+    extractBlocks(m.text).forEach((block, i) => {
+      if (!block.complete || m.blocks[i]) return;
+      try {
+        const report = window.ERDiagram.apply(parseSpec(block.body));
+        m.blocks[i] = { status: 'applied', report, version: changeCounter };
+        lastSent = snap();
+        updateChip();
+      } catch (err) {
+        m.blocks[i] = { status: 'error', error: err.message };
+      }
+    });
+  }
+
+  function cardHtml(m, block, index) {
+    const state = m.blocks?.[index];
+    const icon = (name) => ICON(name);
+    if (!block.complete) {
+      const count = (block.body.match(/"label"/g) || []).length;
+      return `<div class="er-card"><span class="er-card-icon"><span class="spinner"></span></span><div class="er-card-text"><strong>Designing on your canvas…</strong><span>${count ? `${count} elements so far` : 'Planning the layout'}</span></div></div>`;
+    }
+    if (!state) return '';
+    if (state.status === 'error') {
+      return `<div class="er-card error"><span class="er-card-icon">${icon('x')}</span><div class="er-card-text"><strong>Couldn't build that diagram</strong><span>${esc(state.error)}. Ask me to try again.</span></div></div>`;
+    }
+    if (state.status === 'undone') {
+      return `<div class="er-card"><span class="er-card-icon">${icon('undo')}</span><div class="er-card-text"><strong>Diagram changes undone</strong></div></div>`;
+    }
+    const note = state.report.warnings.length ? `${summarize(state.report)} · ${state.report.warnings.length} skipped` : summarize(state.report);
+    const undoable = state.version === changeCounter;
+    return `<div class="er-card done"><span class="er-card-icon">${icon('wand')}</span><div class="er-card-text"><strong>Diagram updated</strong><span>${esc(note)}</span></div>` +
+      '<div class="er-card-actions">' +
+      `<button type="button" class="btn ghost" data-er-fit>Fit view</button>` +
+      (undoable ? `<button type="button" class="btn ghost" data-er-undo="${index}">Undo</button>` : '') + '</div></div>';
+  }
+
+  // Swap ```er-diagram blocks for placeholders, render markdown, then drop the status cards in.
+  function renderWithCards(m) {
+    const blocks = extractBlocks(m.text);
+    let text = '';
+    let cursor = 0;
+    blocks.forEach((block, i) => {
+      text += m.text.slice(cursor, block.start) + `\n\n@@ER${i}@@\n\n`;
+      cursor = block.end;
+    });
+    text += m.text.slice(cursor);
+    let html = renderMarkdown(text);
+    blocks.forEach((block, i) => {
+      html = html.replace(`<p>@@ER${i}@@</p>`, cardHtml(m, block, i));
+    });
+    return html;
+  }
+
   /* ---------- Message rendering ---------- */
 
   function nearBottom() {
@@ -225,16 +324,17 @@
     node.appendChild(caret);
   }
 
-  function paint(m) {
+  function paint(m, quiet) {
     if (m.role !== 'assistant') return;
+    processBlocks(m);
     const body = m.bodyEl;
     if (m.status === 'streaming' && !m.text) {
       body.innerHTML = '<span class="typing" aria-label="Thinking"><i></i><i></i><i></i></span>';
     } else {
-      body.innerHTML = renderMarkdown(m.text);
+      body.innerHTML = renderWithCards(m);
       if (m.status === 'streaming') appendCaret(body);
     }
-    scrollToEnd();
+    if (!quiet) scrollToEnd();
   }
 
   function buildMessage(m) {
@@ -262,6 +362,20 @@
       el.className = 'msg ai';
       el.innerHTML = `<span class="msg-avatar">${ICON('sparkle')}</span><div class="msg-main"><div class="msg-body md"></div></div>`;
       m.bodyEl = el.querySelector('.msg-body');
+      m.bodyEl.addEventListener('click', (e) => {
+        const undoBtn = e.target.closest('[data-er-undo]');
+        if (undoBtn) {
+          const block = m.blocks?.[Number(undoBtn.dataset.erUndo)];
+          if (block && block.version === changeCounter) {
+            window.ERDiagram.undo();
+            block.status = 'undone';
+            lastSent = snap();
+            paint(m, true);
+          }
+        } else if (e.target.closest('[data-er-fit]')) {
+          window.ERDiagram.fit();
+        }
+      });
       m.mainEl = el.querySelector('.msg-main');
     }
     m.el = el;
@@ -322,15 +436,16 @@
     const sel = s.elements.find((e) => e.id === s.selectedId);
     const ideas = s.elements.length
       ? [
-          sel && sel.label ? `What role does "${sel.label}" play in my diagram?` : null,
-          'Review my diagram for modelling mistakes',
-          'Which attributes or keys am I missing?',
+          'Add the missing attributes and relationships to my diagram',
+          'Review my diagram for modelling mistakes and fix them',
+          sel && sel.label ? `Add three more attributes to "${sel.label}"` : null,
           'Convert this diagram into SQL tables',
         ].filter(Boolean).slice(0, 4)
       : [
-          'Sketch an ER diagram for a hospital',
-          'When should I use a weak entity?',
-          'How do I model a many-to-many relationship?',
+          'Design a school management system',
+          'Design a hospital management ER diagram',
+          'Build an online food delivery ER diagram',
+          'Design a library system with fines and reservations',
         ];
 
     const wrap = document.createElement('div');
@@ -371,7 +486,10 @@
         if (recent) content.push({ type: 'image', mediaType: img.mediaType, data: img.data });
         else content.push({ type: 'text', text: '(an earlier image was attached here)' });
       });
-      if (m.text) content.push({ type: 'text', text: m.text });
+      const text = m.role === 'assistant'
+        ? m.text.replace(/```er-diagram[^\n]*\n[\s\S]*?```/g, '[Applied the diagram changes to the canvas.]')
+        : m.text;
+      if (text) content.push({ type: 'text', text });
       return { role: m.role, content };
     });
   }
@@ -620,7 +738,7 @@
   emptyAi.addEventListener('click', () => {
     setOpen(true);
     if (!input.value) {
-      input.value = 'Sketch a starter ER diagram for ';
+      input.value = 'Design an ER diagram for a ';
       autosize();
       syncSend();
       input.setSelectionRange(input.value.length, input.value.length);

@@ -1,7 +1,9 @@
 const appEl = document.getElementById('app');
 const canvas = document.getElementById('canvas');
+const world = document.getElementById('world');
 const connectionsSvg = document.getElementById('connections');
 const labelInput = document.getElementById('prop-label');
+const labelFieldLabel = document.getElementById('prop-label-text');
 const typeReadout = document.getElementById('prop-type');
 const propSummary = document.getElementById('prop-summary');
 const propLinksField = document.getElementById('prop-links-field');
@@ -12,6 +14,10 @@ const moveBtn = document.getElementById('mode-move');
 const connectToggle = document.getElementById('connect-toggle');
 const undoBtn = document.getElementById('undo-btn');
 const redoBtn = document.getElementById('redo-btn');
+const zoomInBtn = document.getElementById('zoom-in');
+const zoomOutBtn = document.getElementById('zoom-out');
+const zoomFitBtn = document.getElementById('zoom-fit');
+const zoomLabel = document.getElementById('zoom-label');
 const themeToggle = document.getElementById('theme-toggle');
 const paletteEl = document.getElementById('palette');
 const emptyState = document.getElementById('empty-state');
@@ -36,6 +42,9 @@ const state = {
   undoStack: [],
   redoStack: [],
 };
+
+// Pan and zoom: the world layer is translated and scaled, element coordinates stay in world units.
+const view = { x: 0, y: 0, z: 1 };
 
 let idCounter = 1;
 let connectionCounter = 1;
@@ -66,7 +75,6 @@ const paletteTypes = [
   ['isa', 'ISA'],
 ];
 
-// Template coordinates are top-left positions; loadTemplate() centers the whole layout.
 const templates = {
   library: {
     elements: [
@@ -83,10 +91,10 @@ const templates = {
       { key: 'MemberID', type: 'key-attribute', label: 'Member ID', x: 240, y: 470 },
     ],
     connections: [
-      ['Author', 'Writes'], ['Book', 'Writes'],
+      ['Author', 'Writes', 'N'], ['Book', 'Writes', 'M'],
       ['Author', 'AuthorID'], ['Author', 'AuthorName'],
       ['Book', 'ISBN'], ['Book', 'Title'],
-      ['Book', 'Loans'], ['Borrower', 'Loans'], ['Loans', 'LoanDate'],
+      ['Book', 'Loans', '1'], ['Borrower', 'Loans', 'N'], ['Loans', 'LoanDate'],
       ['Borrower', 'MemberID'],
     ],
   },
@@ -106,7 +114,7 @@ const templates = {
       { key: 'ProductID', type: 'key-attribute', label: 'Product ID', x: 240, y: 470 },
     ],
     connections: [
-      ['Customer', 'Places'], ['Order', 'Places'],
+      ['Customer', 'Places', '1'], ['Order', 'Places', 'N'],
       ['Customer', 'CustomerID'], ['Customer', 'Email'],
       ['Order', 'OrderID'], ['Order', 'OrderDate'],
       ['Order', 'OrderLine'], ['Product', 'OrderLine'],
@@ -129,10 +137,10 @@ const templates = {
       { key: 'EmployeeID', type: 'key-attribute', label: 'Employee ID', x: 240, y: 470 },
     ],
     connections: [
-      ['Student', 'Enrolls'], ['Course', 'Enrolls'], ['Enrolls', 'Grade'],
+      ['Student', 'Enrolls', 'N'], ['Course', 'Enrolls', 'M'], ['Enrolls', 'Grade'],
       ['Student', 'StudentID'], ['Student', 'StudentName'],
       ['Course', 'CourseCode'], ['Course', 'CourseTitle'],
-      ['Instructor', 'Teaches'], ['Course', 'Teaches'],
+      ['Instructor', 'Teaches', '1'], ['Course', 'Teaches', 'N'],
       ['Instructor', 'EmployeeID'],
     ],
   },
@@ -220,6 +228,64 @@ function emit(name) {
   window.dispatchEvent(new CustomEvent(name));
 }
 
+// Pointer position in world coordinates.
+function toWorld(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: (clientX - rect.left - view.x) / view.z, y: (clientY - rect.top - view.y) / view.z };
+}
+
+/* ---------- Pan, zoom, fit ---------- */
+
+const MIN_ZOOM = 0.15;
+const MAX_ZOOM = 2.5;
+
+function applyView() {
+  world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.z})`;
+  canvas.style.setProperty('--vx', `${view.x}px`);
+  canvas.style.setProperty('--vy', `${view.y}px`);
+  canvas.style.setProperty('--vz', String(view.z));
+  canvas.classList.toggle('far', view.z < 0.55);
+  zoomLabel.textContent = `${Math.round(view.z * 100)}%`;
+}
+
+function zoomAt(clientX, clientY, factor) {
+  const rect = canvas.getBoundingClientRect();
+  const px = clientX - rect.left;
+  const py = clientY - rect.top;
+  const z = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.z * factor));
+  view.x = px - ((px - view.x) * z) / view.z;
+  view.y = py - ((py - view.y) * z) / view.z;
+  view.z = z;
+  applyView();
+}
+
+function zoomCenter(factor) {
+  const rect = canvas.getBoundingClientRect();
+  zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, factor);
+}
+
+function fitView() {
+  const items = Array.from(state.elements.values());
+  if (!items.length) {
+    view.x = 0;
+    view.y = 0;
+    view.z = 1;
+    applyView();
+    return;
+  }
+  const minX = Math.min(...items.map((i) => i.x));
+  const minY = Math.min(...items.map((i) => i.y));
+  const maxX = Math.max(...items.map((i) => i.x + i.el.offsetWidth));
+  const maxY = Math.max(...items.map((i) => i.y + i.el.offsetHeight));
+  const availW = canvas.clientWidth - 64;
+  const availH = canvas.clientHeight - 130; // leave room for the toolbar
+  const z = Math.min(1, Math.max(MIN_ZOOM, Math.min(availW / (maxX - minX), availH / (maxY - minY))));
+  view.z = z;
+  view.x = (canvas.clientWidth - (maxX - minX) * z) / 2 - minX * z;
+  view.y = (availH + 40 - (maxY - minY) * z) / 2 - minY * z + 8;
+  applyView();
+}
+
 /* ---------- Selection & inspector ---------- */
 
 function setSelected(id) {
@@ -255,6 +321,7 @@ function refreshInspector() {
 
   if (node) {
     propSummary.textContent = typeLabels[node.type] || node.type;
+    labelFieldLabel.textContent = 'Name';
     if (document.activeElement !== labelInput) labelInput.value = node.label;
     labelInput.disabled = false;
     labelInput.placeholder = typeLabels[node.type];
@@ -277,10 +344,11 @@ function refreshInspector() {
   } else if (link) {
     const a = state.elements.get(link.from);
     const b = state.elements.get(link.to);
-    propSummary.textContent = 'Connection';
-    labelInput.value = a && b ? `${displayName(a)} — ${displayName(b)}` : '';
-    labelInput.disabled = true;
-    labelInput.placeholder = '';
+    propSummary.textContent = a && b ? `${displayName(a)} — ${displayName(b)}` : 'Connection';
+    labelFieldLabel.textContent = 'Cardinality';
+    if (document.activeElement !== labelInput) labelInput.value = link.label || '';
+    labelInput.disabled = false;
+    labelInput.placeholder = '1, N, M…';
     typeReadout.textContent = 'Connection';
     typeReadout.classList.add('set');
     propLinksField.hidden = true;
@@ -288,6 +356,7 @@ function refreshInspector() {
     setDeleteLabel('Delete connection');
   } else {
     propSummary.textContent = 'Nothing selected';
+    labelFieldLabel.textContent = 'Name';
     labelInput.value = '';
     labelInput.disabled = true;
     labelInput.placeholder = 'Select an element';
@@ -403,13 +472,13 @@ function createElement({ type, x, y, label, id: forcedId = null, silent = false 
       e.stopPropagation();
       state.pendingConnectionFrom = id;
       state.isDraggingConnection = true;
-      state.connectionDragPos = { x: e.clientX, y: e.clientY };
+      state.connectionDragPos = toWorld(e.clientX, e.clientY);
       document.addEventListener('pointermove', handleConnectionMove);
       document.addEventListener('pointerup', handleConnectionUp, { once: true });
     });
   });
 
-  canvas.appendChild(el);
+  world.appendChild(el);
 
   const elementData = { id, type, x, y, label: label || '', el, labelEl, observer: null, beginEdit: null };
   state.elements.set(id, elementData);
@@ -479,19 +548,15 @@ function createElement({ type, x, y, label, id: forcedId = null, silent = false 
   el.addEventListener('pointerdown', (event) => {
     if (event.button !== 0) return;
     if (event.target.classList.contains('anchor') || el.classList.contains('editing')) return;
+    event.stopPropagation();
 
     if (state.connectMode) {
       handleConnectClick(id);
       return;
     }
 
-    const rect = canvas.getBoundingClientRect();
-    state.dragging = {
-      id,
-      offsetX: event.clientX - rect.left - elementData.x,
-      offsetY: event.clientY - rect.top - elementData.y,
-      moved: false,
-    };
+    const p = toWorld(event.clientX, event.clientY);
+    state.dragging = { id, offsetX: p.x - elementData.x, offsetY: p.y - elementData.y, moved: false };
     el.classList.add('dragging');
     el.setPointerCapture(event.pointerId);
     if (state.selectedId !== id) setSelected(id);
@@ -503,8 +568,8 @@ function createElement({ type, x, y, label, id: forcedId = null, silent = false 
     // Show only the connection dot nearest the pointer.
     if (!state.dragging) {
       const rect = el.getBoundingClientRect();
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
+      const mouseX = (event.clientX - rect.left) / view.z;
+      const mouseY = (event.clientY - rect.top) / view.z;
       let closest = null;
       let minDistance = Infinity;
 
@@ -520,9 +585,9 @@ function createElement({ type, x, y, label, id: forcedId = null, silent = false 
     }
 
     if (!state.dragging || state.dragging.id !== id) return;
-    const rect = canvas.getBoundingClientRect();
+    const p = toWorld(event.clientX, event.clientY);
     state.dragging.moved = true;
-    moveElement(id, event.clientX - rect.left - state.dragging.offsetX, event.clientY - rect.top - state.dragging.offsetY);
+    moveElement(id, p.x - state.dragging.offsetX, p.y - state.dragging.offsetY);
   });
 
   el.addEventListener('pointerleave', () => {
@@ -585,25 +650,17 @@ function updateEmptyState() {
 function moveElement(id, x, y) {
   const item = state.elements.get(id);
   if (!item) return;
-
-  const maxX = canvas.clientWidth - item.el.offsetWidth;
-  const maxY = canvas.clientHeight - item.el.offsetHeight;
-  item.x = Math.max(8, Math.min(x, maxX - 8));
-  item.y = Math.max(8, Math.min(y, maxY - 8));
-  item.el.style.left = `${item.x}px`;
-  item.el.style.top = `${item.y}px`;
+  item.x = x;
+  item.y = y;
+  item.el.style.left = `${x}px`;
+  item.el.style.top = `${y}px`;
   renderConnections();
 }
 
 /* ---------- Connections ---------- */
 
-function getElementCenter(el) {
-  const rect = el.getBoundingClientRect();
-  const canvasRect = canvas.getBoundingClientRect();
-  return {
-    x: rect.left - canvasRect.left + rect.width / 2,
-    y: rect.top - canvasRect.top + rect.height / 2,
-  };
+function getElementCenter(item) {
+  return { x: item.x + item.el.offsetWidth / 2, y: item.y + item.el.offsetHeight / 2 };
 }
 
 function svgLine(cls, from, to) {
@@ -626,62 +683,78 @@ function renderConnections() {
   });
 }
 
+// Where a cardinality label sits: just outside the entity end of a connection.
+function labelPoint(connection, from, to, a, b) {
+  const entityEnd = (item) => /entity$/.test(item.type);
+  const target = entityEnd(from) && !entityEnd(to) ? { item: from, c: a, other: b } : { item: to, c: b, other: a };
+  const dx = target.other.x - target.c.x;
+  const dy = target.other.y - target.c.y;
+  const d = Math.hypot(dx, dy) || 1;
+  const ux = dx / d;
+  const uy = dy / d;
+  const hw = target.item.el.offsetWidth / 2;
+  const hh = target.item.el.offsetHeight / 2;
+  const t = Math.min(hw / (Math.abs(ux) || 1e-6), hh / (Math.abs(uy) || 1e-6));
+  const off = t + 18;
+  return { x: target.c.x + ux * off, y: target.c.y + uy * off };
+}
+
 function drawConnections() {
   connectionsSvg.innerHTML = '';
-  const canvasRect = canvas.getBoundingClientRect();
 
   state.connections.forEach((connection) => {
     const from = state.elements.get(connection.from);
     const to = state.elements.get(connection.to);
     if (!from || !to) return;
-    const a = getElementCenter(from.el);
-    const b = getElementCenter(to.el);
+    const a = getElementCenter(from);
+    const b = getElementCenter(to);
 
     const line = svgLine('connection-line', a, b);
-    if (connection.id === state.selectedConnectionId) {
-      line.style.stroke = 'var(--sel)';
-      line.style.strokeWidth = '3.5';
-    }
+    if (connection.id === state.selectedConnectionId) line.classList.add('selected');
     connectionsSvg.appendChild(line);
 
-    // Wide invisible stroke so thin lines are easy to click.
     const hit = svgLine('connection-hit', a, b);
-    hit.setAttribute('stroke', 'transparent');
-    hit.setAttribute('stroke-width', '14');
-    hit.style.pointerEvents = 'stroke';
-    hit.style.cursor = 'pointer';
     hit.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
       setSelectedConnection(connection.id);
     });
     connectionsSvg.appendChild(hit);
+
+    if (connection.label) {
+      const p = labelPoint(connection, from, to, a, b);
+      const text = document.createElementNS(SVG_NS, 'text');
+      text.setAttribute('class', 'connection-label');
+      text.setAttribute('x', p.x);
+      text.setAttribute('y', p.y);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('dominant-baseline', 'central');
+      text.textContent = connection.label;
+      connectionsSvg.appendChild(text);
+    }
   });
 
   if (state.isDraggingConnection && state.pendingConnectionFrom) {
     const from = state.elements.get(state.pendingConnectionFrom);
     if (from) {
-      connectionsSvg.appendChild(
-        svgLine('connection-line preview', getElementCenter(from.el), {
-          x: state.connectionDragPos.x - canvasRect.left,
-          y: state.connectionDragPos.y - canvasRect.top,
-        })
-      );
+      connectionsSvg.appendChild(svgLine('connection-line preview', getElementCenter(from), state.connectionDragPos));
     }
   }
 }
 
-function addConnection(fromId, toId) {
+function addConnection(fromId, toId, label = '') {
   if (!fromId || !toId || fromId === toId) return false;
   const exists = state.connections.some(
     (c) => (c.from === fromId && c.to === toId) || (c.from === toId && c.to === fromId)
   );
   if (exists) return false;
-  state.connections.push({ id: `connection-${connectionCounter++}`, from: fromId, to: toId });
+  const connection = { id: `connection-${connectionCounter++}`, from: fromId, to: toId };
+  if (label) connection.label = String(label).slice(0, 12);
+  state.connections.push(connection);
   return true;
 }
 
 function handleConnectionMove(e) {
-  state.connectionDragPos = { x: e.clientX, y: e.clientY };
+  state.connectionDragPos = toWorld(e.clientX, e.clientY);
   renderConnections();
 }
 
@@ -717,24 +790,24 @@ function handleConnectClick(id) {
 
 /* ---------- Actions ---------- */
 
+function removeNode(id) {
+  const item = state.elements.get(id);
+  if (!item) return;
+  removeNodeDom(item);
+  state.elements.delete(id);
+  state.connections = state.connections.filter((c) => c.from !== id && c.to !== id);
+  if (state.selectedId === id) state.selectedId = null;
+}
+
 function deleteSelected() {
   if (state.selectedConnectionId) {
     state.connections = state.connections.filter((c) => c.id !== state.selectedConnectionId);
     state.selectedConnectionId = null;
-    refreshInspector();
-    renderConnections();
-    saveState();
-    emit('diagram:selection');
+  } else if (state.selectedId) {
+    removeNode(state.selectedId);
+  } else {
     return;
   }
-
-  const item = state.selectedId && state.elements.get(state.selectedId);
-  if (!item) return;
-  const id = item.id;
-  removeNodeDom(item);
-  state.elements.delete(id);
-  state.connections = state.connections.filter((c) => c.from !== id && c.to !== id);
-  state.selectedId = null;
   refreshInspector();
   renderConnections();
   updateEmptyState();
@@ -768,21 +841,18 @@ async function loadTemplate(key) {
   }
 
   clearCanvas();
-
-  // Center the layout in the current canvas.
-  const xs = template.elements.map((e) => e.x);
-  const ys = template.elements.map((e) => e.y);
-  const spanX = Math.max(...xs) - Math.min(...xs) + 150;
-  const spanY = Math.max(...ys) - Math.min(...ys) + 90;
-  const offsetX = Math.max(12, (canvas.clientWidth - spanX) / 2) - Math.min(...xs);
-  const offsetY = Math.max(12, (canvas.clientHeight - spanY) / 2 - 24) - Math.min(...ys);
-
+  const positions = window.ERLayout.layout(
+    template.elements.map((e) => ({ id: e.key, type: e.type, label: e.label })),
+    template.connections.map(([from, to]) => ({ from, to }))
+  );
   const idMap = new Map();
   template.elements.forEach((item) => {
-    idMap.set(item.key, createElement({ type: item.type, x: item.x + offsetX, y: item.y + offsetY, label: item.label, silent: true }));
+    const pos = positions.get(item.key);
+    idMap.set(item.key, createElement({ type: item.type, x: pos.x, y: pos.y, label: item.label, silent: true }));
   });
-  template.connections.forEach(([fromKey, toKey]) => addConnection(idMap.get(fromKey), idMap.get(toKey)));
+  template.connections.forEach(([fromKey, toKey, label]) => addConnection(idMap.get(fromKey), idMap.get(toKey), label));
 
+  fitView();
   renderConnections();
   saveState();
 }
@@ -817,12 +887,166 @@ function setTheme(theme) {
   themeToggle.setAttribute('aria-label', theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
 }
 
+/* ---------- AI diagram specs ---------- */
+
+const TYPE_ALIASES = {
+  'entity': 'entity', 'table': 'entity', 'strong-entity': 'entity',
+  'weak-entity': 'weak-entity', 'weak': 'weak-entity',
+  'relationship': 'relationship', 'relation': 'relationship', 'rel': 'relationship',
+  'identifying-relationship': 'identifying-relationship', 'identifying': 'identifying-relationship',
+  'attribute': 'attribute', 'attr': 'attribute', 'simple-attribute': 'attribute',
+  'key-attribute': 'key-attribute', 'key': 'key-attribute', 'primary-key': 'key-attribute', 'pk': 'key-attribute',
+  'multivalued-attribute': 'multivalued-attribute', 'multivalued': 'multivalued-attribute', 'multi-valued': 'multivalued-attribute', 'multi': 'multivalued-attribute',
+  'derived-attribute': 'derived-attribute', 'derived': 'derived-attribute',
+  'isa': 'isa', 'generalization': 'isa', 'specialization': 'isa', 'inheritance': 'isa',
+  'associative-entity': 'associative-entity', 'associative': 'associative-entity',
+};
+
+function normalizeType(raw) {
+  return TYPE_ALIASES[String(raw || '').trim().toLowerCase().replace(/[\s_]+/g, '-')] || null;
+}
+
+// "*id" key, "+phones" multivalued, "~age" derived, anything else a plain attribute.
+function parseAttr(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  const prefix = text[0];
+  if (prefix === '*') return { type: 'key-attribute', label: text.slice(1).trim() };
+  if (prefix === '+') return { type: 'multivalued-attribute', label: text.slice(1).trim() };
+  if (prefix === '~') return { type: 'derived-attribute', label: text.slice(1).trim() };
+  return { type: 'attribute', label: text };
+}
+
+const norm = (s) => String(s || '').trim().toLowerCase();
+
+// Apply an AI-written diagram spec in one undoable step. New elements are laid out automatically
+// around the existing ones, which never move.
+function applySpec(spec) {
+  const report = { added: 0, connected: 0, renamed: 0, removed: 0, replaced: false, warnings: [] };
+  if (!spec || typeof spec !== 'object') throw new Error('The diagram spec was empty.');
+
+  if (spec.mode === 'replace') {
+    clearCanvas();
+    report.replaced = true;
+  }
+
+  const findExisting = (name, types) => {
+    const target = norm(name);
+    return Array.from(state.elements.values()).find((i) => norm(i.label) === target && (!types || types.has(i.type)));
+  };
+
+  (Array.isArray(spec.rename) ? spec.rename : []).forEach((r) => {
+    const item = findExisting(r?.target ?? r?.from);
+    const next = String(r?.label ?? r?.to ?? '').trim();
+    if (!item || !next) { report.warnings.push(`Could not rename "${r?.target ?? r?.from}".`); return; }
+    item.label = next;
+    item.labelEl.textContent = next;
+    report.renamed++;
+  });
+
+  (Array.isArray(spec.remove) ? spec.remove : []).forEach((name) => {
+    const item = findExisting(name);
+    if (!item) { report.warnings.push(`Could not find "${name}" to remove.`); return; }
+    removeNode(item.id);
+    report.removed++;
+  });
+
+  const refs = new Map(); // spec id -> element id
+  const fresh = []; // { ref, type, label }
+  const freshEdges = [];
+  const NON_ATTR = new Set(['entity', 'weak-entity', 'relationship', 'identifying-relationship', 'associative-entity', 'isa']);
+
+  (Array.isArray(spec.nodes) ? spec.nodes : []).forEach((raw, index) => {
+    const type = normalizeType(raw?.type);
+    const label = String(raw?.label ?? raw?.name ?? '').trim();
+    if (!type || !label) { report.warnings.push(`Skipped node #${index + 1}: needs a valid type and label.`); return; }
+    const ref = String(raw.id ?? label);
+
+    // Re-using a name that is already on the canvas links to it instead of duplicating it.
+    const existing = NON_ATTR.has(type) ? findExisting(label, new Set([type, ...(type.endsWith('entity') ? ['entity', 'weak-entity', 'associative-entity'] : [])])) : null;
+    let ownerId;
+    if (existing) {
+      refs.set(ref, existing.id);
+      ownerId = existing.id;
+    } else {
+      ownerId = `new:${ref}`;
+      refs.set(ref, ownerId);
+      fresh.push({ ref: ownerId, type, label });
+    }
+
+    (Array.isArray(raw.attrs) ? raw.attrs : []).forEach((a, i) => {
+      const attr = parseAttr(a);
+      if (!attr || !attr.label) return;
+      if (existing) {
+        const dup = state.connections.some((c) => {
+          const other = state.elements.get(c.from === existing.id ? c.to : c.to === existing.id ? c.from : null);
+          return other && !NON_ATTR.has(other.type) && norm(other.label) === norm(attr.label);
+        });
+        if (dup) return;
+      }
+      const attrRef = `new:${ref}.attr${i}`;
+      fresh.push({ ref: attrRef, type: attr.type, label: attr.label });
+      freshEdges.push({ from: ownerId, to: attrRef });
+    });
+  });
+
+  const resolve = (name) => {
+    const key = String(name);
+    if (refs.has(key)) return refs.get(key);
+    const item = findExisting(key);
+    if (item) return item.id;
+    report.warnings.push(`Unknown element "${key}" in a connection.`);
+    return null;
+  };
+  (Array.isArray(spec.edges) ? spec.edges : []).forEach((edge) => {
+    const from = Array.isArray(edge) ? edge[0] : edge?.from;
+    const to = Array.isArray(edge) ? edge[1] : edge?.to;
+    const label = Array.isArray(edge) ? edge[2] : edge?.label;
+    const a = resolve(from);
+    const b = resolve(to);
+    if (a && b && a !== b) freshEdges.push({ from: a, to: b, label });
+  });
+
+  // Layout: existing elements stay where they are, new ones are placed around them.
+  const layoutNodes = [
+    ...Array.from(state.elements.values()).map((i) => ({
+      id: i.id, type: i.type, label: i.label, x: i.x, y: i.y, w: i.el.offsetWidth, h: i.el.offsetHeight, pinned: true,
+    })),
+    ...fresh.map((f) => ({ id: f.ref, type: f.type, label: f.label })),
+  ];
+  const layoutEdges = [
+    ...state.connections.map((c) => ({ from: c.from, to: c.to })),
+    ...freshEdges.map((e) => ({ from: e.from, to: e.to })),
+  ];
+  const positions = window.ERLayout.layout(layoutNodes, layoutEdges);
+
+  const created = new Map();
+  fresh.forEach((f) => {
+    const pos = positions.get(f.ref);
+    created.set(f.ref, createElement({ type: f.type, x: pos.x, y: pos.y, label: f.label, silent: true }));
+    report.added++;
+  });
+  const real = (id) => created.get(id) || id;
+  freshEdges.forEach((e) => { if (addConnection(real(e.from), real(e.to), e.label)) report.connected++; });
+
+  state.selectedId = null;
+  state.selectedConnectionId = null;
+  refreshInspector();
+  renderConnections();
+  updateEmptyState();
+  saveState();
+  emit('diagram:selection');
+  if (report.added || report.replaced) requestAnimationFrame(() => requestAnimationFrame(fitView));
+  return report;
+}
+
 /* ---------- Palette drag & click ---------- */
 
-// Near the middle of the canvas, nudged so repeated clicks don't stack exactly.
+// Near the middle of the visible canvas, nudged so repeated clicks don't stack exactly.
 function centerSpot() {
   const n = state.elements.size % 6;
-  return { x: canvas.clientWidth / 2 - 64 + n * 24 - 60, y: canvas.clientHeight / 2 - 28 + n * 24 - 60 };
+  const c = toWorld(canvas.getBoundingClientRect().left + canvas.clientWidth / 2, canvas.getBoundingClientRect().top + canvas.clientHeight / 2);
+  return { x: c.x - 64 + n * 24 - 60, y: c.y - 28 + n * 24 - 60 };
 }
 
 function addFromPalette(type, x, y) {
@@ -861,11 +1085,11 @@ paletteEl.addEventListener('pointerdown', (event) => {
     const rect = canvas.getBoundingClientRect();
 
     if (!ghost) {
-      // A plain click adds the element near the middle of the canvas, offset so repeats don't stack.
       const spot = centerSpot();
       addFromPalette(type, spot.x, spot.y);
     } else if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
-      addFromPalette(type, e.clientX - rect.left - 60, e.clientY - rect.top - 30);
+      const p = toWorld(e.clientX, e.clientY);
+      addFromPalette(type, p.x - 60, p.y - 30);
     }
   };
 
@@ -883,19 +1107,59 @@ paletteEl.addEventListener('keydown', (event) => {
 
 /* ---------- Wiring ---------- */
 
+// Drag the empty canvas to pan; a plain click clears the selection.
 canvas.addEventListener('pointerdown', (event) => {
-  if (event.target === canvas || event.target === connectionsSvg) {
-    setConnectSource(null);
-    setSelected(null);
-  }
+  if (event.button !== 0 || (event.target !== canvas && event.target !== world && event.target !== connectionsSvg)) return;
+  setConnectSource(null);
+  const start = { x: event.clientX, y: event.clientY, vx: view.x, vy: view.y };
+  let moved = false;
+  canvas.setPointerCapture(event.pointerId);
+  canvas.classList.add('panning');
+
+  const move = (e) => {
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+    if (!moved && Math.hypot(dx, dy) < 4) return;
+    moved = true;
+    view.x = start.vx + dx;
+    view.y = start.vy + dy;
+    applyView();
+  };
+  const up = () => {
+    canvas.removeEventListener('pointermove', move);
+    canvas.classList.remove('panning');
+    if (!moved) setSelected(null);
+  };
+  canvas.addEventListener('pointermove', move);
+  canvas.addEventListener('pointerup', up, { once: true });
+  canvas.addEventListener('pointercancel', up, { once: true });
 });
+
+// Ctrl/Cmd + wheel (or trackpad pinch) zooms at the cursor; plain wheel pans.
+canvas.addEventListener('wheel', (event) => {
+  event.preventDefault();
+  if (event.ctrlKey || event.metaKey) {
+    zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY * 0.01));
+  } else {
+    view.x -= event.deltaX;
+    view.y -= event.deltaY;
+    applyView();
+  }
+}, { passive: false });
 
 let labelSaveTimer = null;
 labelInput.addEventListener('input', (event) => {
-  const item = state.selectedId && state.elements.get(state.selectedId);
-  if (!item) return;
-  item.label = event.target.value;
-  item.labelEl.textContent = item.label;
+  const link = state.selectedConnectionId && state.connections.find((c) => c.id === state.selectedConnectionId);
+  if (link) {
+    link.label = event.target.value.trim().slice(0, 12) || undefined;
+    if (!link.label) delete link.label;
+    renderConnections();
+  } else {
+    const item = state.selectedId && state.elements.get(state.selectedId);
+    if (!item) return;
+    item.label = event.target.value;
+    item.labelEl.textContent = item.label;
+  }
   clearTimeout(labelSaveTimer);
   labelSaveTimer = setTimeout(saveState, 500);
 });
@@ -910,6 +1174,9 @@ deleteBtn.addEventListener('click', deleteSelected);
 clearBtn.addEventListener('click', requestClear);
 undoBtn.addEventListener('click', undo);
 redoBtn.addEventListener('click', redo);
+zoomInBtn.addEventListener('click', () => zoomCenter(1.25));
+zoomOutBtn.addEventListener('click', () => zoomCenter(0.8));
+zoomFitBtn.addEventListener('click', fitView);
 themeToggle.addEventListener('click', () => {
   setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
 });
@@ -937,6 +1204,8 @@ window.addEventListener('keydown', (e) => {
     setMode('move');
   } else if (!mod && !e.altKey && e.key.toLowerCase() === 'c') {
     setMode('connect');
+  } else if (!mod && !e.altKey && e.key.toLowerCase() === 'f') {
+    fitView();
   }
 });
 
@@ -946,6 +1215,9 @@ window.addEventListener('resize', renderConnections);
 
 window.ERDiagram = {
   typeLabels,
+  apply: applySpec,
+  undo,
+  fit: fitView,
   getSnapshot() {
     return {
       elements: Array.from(state.elements.values()).map((item) => ({
@@ -956,7 +1228,7 @@ window.ERDiagram = {
         x: Math.round(item.x),
         y: Math.round(item.y),
       })),
-      connections: state.connections.map((c) => ({ id: c.id, from: c.from, to: c.to })),
+      connections: state.connections.map((c) => ({ id: c.id, from: c.from, to: c.to, label: c.label || '' })),
       selectedId: state.selectedId,
       selectedConnectionId: state.selectedConnectionId,
     };
@@ -968,6 +1240,7 @@ window.ERDiagram = {
 renderPalette();
 setTheme(document.documentElement.dataset.theme || 'light');
 setMode('move');
+applyView();
 refreshInspector();
 updateEmptyState();
 saveState();
