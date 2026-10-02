@@ -2,7 +2,14 @@
 // local dev server (Node 18+), so it only uses web-standard APIs.
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const DEFAULT_MODEL = 'claude-sonnet-5-5';
+const DEFAULT_BASE_URL = 'https://api.xkiro.com/v1';
+export const MODELS = [
+  'qwen/qwen3.8-omni-flash:free',
+  'qwen/qwen3.8-max:free',
+  'meituan/longcat-2.5-preview:free',
+  'inclusionai/ling-3.0-flash-sante:free',
+];
+const DEFAULT_MODEL = MODELS[0];
 const MAX_BODY_BYTES = 12 * 1024 * 1024;
 const MAX_MESSAGES = 20;
 const MAX_IMAGES = 8;
@@ -84,7 +91,63 @@ function normalizeMessages(input) {
   return out;
 }
 
-export async function handleChat(request, { apiKey, model, fetchImpl = fetch } = {}) {
+// Convert our normalized messages into OpenAI chat-completions messages.
+function toOpenAI(system, messages) {
+  const out = [{ role: 'system', content: system }];
+  for (const m of messages) {
+    if (m.role === 'assistant') {
+      out.push({ role: 'assistant', content: m.content.map((b) => b.text || '').join('\n') });
+    } else {
+      out.push({
+        role: 'user',
+        content: m.content.map((b) =>
+          b.type === 'image'
+            ? { type: 'image_url', image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } }
+            : { type: 'text', text: b.text }
+        ),
+      });
+    }
+  }
+  return out;
+}
+
+// Re-emit an OpenAI-style SSE stream in the small event format the browser parses.
+function normalizeStream(body) {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = '';
+  const emit = (controller, data) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+
+  return body.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true }).replace(/\r\n/g, '\n');
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const evt = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const line = evt.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('');
+        if (!line || line === '[DONE]') continue;
+        let data;
+        try { data = JSON.parse(line); } catch { continue; }
+        if (data.error) {
+          emit(controller, { type: 'error', error: { message: data.error.message || 'The response was interrupted.' } });
+          continue;
+        }
+        const choice = data.choices?.[0];
+        const text = choice?.delta?.content;
+        if (text) emit(controller, { type: 'content_block_delta', delta: { type: 'text_delta', text } });
+        if (choice?.finish_reason === 'length') emit(controller, { type: 'message_delta', delta: { stop_reason: 'max_tokens' } });
+      }
+    },
+  }));
+}
+
+/**
+ * env: { apiKey, baseUrl, model, provider }
+ *   provider 'openai' (default): any OpenAI-compatible /chat/completions endpoint (baseUrl).
+ *   provider 'anthropic': Anthropic Messages API.
+ */
+export async function handleChat(request, { apiKey, baseUrl, model, provider = 'openai', fetchImpl = fetch } = {}) {
   if (request.method !== 'POST') return json(405, { error: 'Use POST.' });
 
   // Same-origin only, so other sites cannot spend this deployment's API key from a browser.
@@ -95,7 +158,7 @@ export async function handleChat(request, { apiKey, model, fetchImpl = fetch } =
 
   if (!apiKey) {
     return json(503, {
-      error: 'The AI assistant is not set up yet. Add an ANTHROPIC_API_KEY environment variable and redeploy.',
+      error: 'The AI assistant is not set up yet. Add an AI_API_KEY environment variable and redeploy.',
     });
   }
 
@@ -112,24 +175,26 @@ export async function handleChat(request, { apiKey, model, fetchImpl = fetch } =
   const messages = normalizeMessages(payload?.messages);
   if (!messages) return json(400, { error: 'Send at least one user message (up to 8 images in total).' });
 
+  const system = buildSystem(payload.context);
+  const chosen = provider === 'openai' && MODELS.includes(payload.model) ? payload.model : (model || DEFAULT_MODEL);
+
   let upstream;
   try {
-    upstream = await fetchImpl(ANTHROPIC_URL, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: model || DEFAULT_MODEL,
-        max_tokens: 2048,
-        stream: true,
-        system: buildSystem(payload.context),
-        messages,
-      }),
-      signal: request.signal,
-    });
+    if (provider === 'anthropic') {
+      upstream = await fetchImpl(ANTHROPIC_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: chosen, max_tokens: 2048, stream: true, system, messages }),
+        signal: request.signal,
+      });
+    } else {
+      upstream = await fetchImpl(`${(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model: chosen, max_tokens: 2048, stream: true, messages: toOpenAI(system, messages) }),
+        signal: request.signal,
+      });
+    }
   } catch (err) {
     if (request.signal?.aborted) return new Response(null, { status: 499 });
     return json(502, { error: 'Could not reach the AI service. Try again in a moment.' });
@@ -138,17 +203,20 @@ export async function handleChat(request, { apiKey, model, fetchImpl = fetch } =
   if (!upstream.ok) {
     let detail = '';
     try {
-      detail = (await upstream.json())?.error?.message || '';
+      const body = await upstream.json();
+      detail = body?.error?.message || body?.message || '';
     } catch { /* body was not JSON */ }
-    console.error('Anthropic API error', upstream.status, detail);
+    console.error('AI API error', upstream.status, detail);
     const friendly =
       upstream.status === 429 ? 'The AI service is busy. Wait a few seconds and try again.'
       : upstream.status === 401 || upstream.status === 403 ? 'The AI service rejected the server API key.'
-      : 'The AI service returned an error. Try again.';
+      : upstream.status === 400 && payload.messages.some((m) => m.content?.some((b) => b.type === 'image'))
+        ? 'That model could not read the request. If you attached images, try the default model.'
+      : 'The AI service returned an error. Try again or pick another model.';
     return json(upstream.status === 429 ? 429 : 502, { error: friendly });
   }
 
-  return new Response(upstream.body, {
+  return new Response(provider === 'anthropic' ? upstream.body : normalizeStream(upstream.body), {
     status: 200,
     headers: {
       'content-type': 'text/event-stream; charset=utf-8',

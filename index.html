@@ -215,7 +215,12 @@
               <svg class="ic"><use href="#i-clip" /></svg>
             </button>
             <input id="ai-file" type="file" accept="image/*" multiple hidden />
-            <span class="composer-hint">Enter to send · Shift+Enter for a new line</span>
+            <select id="ai-model" class="model-select" aria-label="AI model" title="Model">
+              <option value="qwen/qwen3.8-omni-flash:free">Qwen 3.8 Omni Flash</option>
+              <option value="qwen/qwen3.8-max:free">Qwen 3.8 Max</option>
+              <option value="meituan/longcat-2.5-preview:free">LongCat 2.5 Preview</option>
+              <option value="inclusionai/ling-3.0-flash-sante:free">Ling 3.0 Flash</option>
+            </select>
             <button id="ai-send" class="send-btn" type="submit" aria-label="Send message" disabled>
               <svg class="ic send"><use href="#i-send" /></svg>
               <svg class="ic stop"><use href="#i-stop" /></svg>

@@ -14,6 +14,7 @@
   const attachBtn = document.getElementById('ai-attach');
   const fileInput = document.getElementById('ai-file');
   const attachmentsEl = document.getElementById('ai-attachments');
+  const modelSelect = document.getElementById('ai-model');
   const contextEl = document.getElementById('ai-context');
   const contextText = document.getElementById('ai-context-text');
 
@@ -433,6 +434,7 @@
         signal: controller.signal,
         body: JSON.stringify({
           messages: payloadMessages(),
+          model: modelSelect.value,
           context: { canvas: ctx.canvas, changes: ctx.changes, selection: ctx.selection },
         }),
       });
@@ -631,6 +633,14 @@
     lastSent = null;
     updateChip();
     renderWelcome();
+  });
+
+  try {
+    const saved = localStorage.getItem('er-ai-model');
+    if (saved && Array.from(modelSelect.options).some((o) => o.value === saved)) modelSelect.value = saved;
+  } catch { /* storage unavailable */ }
+  modelSelect.addEventListener('change', () => {
+    try { localStorage.setItem('er-ai-model', modelSelect.value); } catch { /* ignore */ }
   });
 
   updateChip();

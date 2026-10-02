@@ -1,5 +1,5 @@
 // Local dev server: serves the static app and the same /api/chat handler used on Netlify.
-//   ANTHROPIC_API_KEY=sk-ant-... node dev-server.mjs
+//   AI_API_KEY=... node dev-server.mjs
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
@@ -40,8 +40,10 @@ http.createServer(async (req, res) => {
     const abort = new AbortController();
     res.on('close', () => abort.abort());
     const response = await handleChat(new Request(request, { signal: abort.signal }), {
-      apiKey: process.env.ANTHROPIC_API_KEY,
-      model: process.env.ANTHROPIC_MODEL,
+      provider: process.env.AI_PROVIDER === 'anthropic' ? 'anthropic' : 'openai',
+      apiKey: process.env.AI_PROVIDER === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.AI_API_KEY,
+      baseUrl: process.env.AI_BASE_URL,
+      model: process.env.AI_MODEL,
     });
     res.writeHead(response.status, Object.fromEntries(response.headers));
     if (response.body) Readable.fromWeb(response.body).pipe(res);

@@ -1423,6 +1423,30 @@ kbd {
   padding: 4px 6px 6px;
 }
 
+.model-select {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.model-select:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.model-select option {
+  background: var(--surface);
+  color: var(--ink);
+}
+
 .composer-hint {
   flex: 1;
   min-width: 0;
