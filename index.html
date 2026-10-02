@@ -4,131 +4,255 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>E-R Diagram Designer</title>
+  <title>ER Diagram Designer</title>
+  <meta name="description" content="Design entity-relationship diagrams on a drafting-table canvas, with an AI assistant that sees your work as you change it." />
+  <script>
+    // Set the theme before first paint so there is no flash.
+    (function () {
+      var saved = null;
+      try { saved = localStorage.getItem('er-theme'); } catch (e) { }
+      var dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 
 <body>
-  <div class="app">
-    <header class="app-header">
-      <div class="header-content">
-        <h1><span class="logo-accent">ER</span>-Diagram Designer</h1>
-        <p class="subhead">Drag elements into the canvas, connect them, and load templates to jump-start any topic.</p>
+  <!-- Icon sprite -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <defs>
+      <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M11 3l1.9 5.6L18.5 10.5 12.9 12.4 11 18l-1.9-5.6L3.5 10.5l5.6-1.9z" /><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z" /></symbol>
+      <symbol id="i-cursor" viewBox="0 0 24 24"><path d="M5 3l14 7-6 2-2 6z" /></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" /><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" /></symbol>
+      <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14L4 9l5-5" /><path d="M4 9h10a6 6 0 0 1 0 12h-3" /></symbol>
+      <symbol id="i-redo" viewBox="0 0 24 24"><path d="M15 14l5-5-5-5" /><path d="M20 9H10a6 6 0 0 0 0 12h3" /></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></symbol>
+      <symbol id="i-clip" viewBox="0 0 24 24"><path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7-7l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9" /></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7" /></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" /></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V6a2 2 0 0 1 2-2h8" /></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5l2 2M20 4v5h-5" /><path d="M20 12a8 8 0 0 1-14 5l-2-2M4 20v-5h5" /></symbol>
+      <symbol id="i-eraser" viewBox="0 0 24 24"><path d="M4 20h16M7 16l-3-3 8.5-8.5a2 2 0 0 1 2.8 0l2.7 2.7a2 2 0 0 1 0 2.8L11 18H8z" /></symbol>
+    </defs>
+  </svg>
+
+  <div class="app" id="app" data-ai="closed">
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <rect x="1.5" y="9" width="11" height="14" rx="3" />
+          <rect x="19.5" y="9" width="11" height="14" rx="3" />
+          <path d="M12.5 16h7" />
+          <circle cx="16" cy="16" r="2.4" class="brand-dot" />
+        </svg>
+        <div class="brand-text">
+          <h1>ER Diagram Designer</h1>
+          <p>Drag, connect, and ask the AI when you're stuck.</p>
+        </div>
       </div>
-      <div class="header-actions">
-        <button id="connect-toggle" class="btn ghost">Connect: Off</button>
-        <button id="clear-canvas" class="btn outline">Clear Canvas</button>
+
+      <div class="topbar-actions">
+        <button id="theme-toggle" class="icon-btn" type="button" aria-label="Switch to light theme" title="Switch theme">
+          <svg class="ic icon-sun"><use href="#i-sun" /></svg>
+          <svg class="ic icon-moon"><use href="#i-moon" /></svg>
+        </button>
+        <button id="ai-toggle" class="btn primary" type="button" aria-controls="assistant" aria-expanded="false">
+          <svg class="ic"><use href="#i-sparkle" /></svg>
+          <span>AI assistant</span>
+        </button>
       </div>
     </header>
 
-    <div class="app-body">
-      <aside class="sidebar">
+    <div class="workspace">
+      <aside class="rail left" aria-label="Elements and templates">
         <section class="panel">
-          <div class="panel-title">
+          <div class="panel-head">
             <h2>Elements</h2>
-            <span>Drag onto the canvas</span>
+            <p>Drag onto the canvas, or click to add</p>
           </div>
-          <div class="palette" id="palette">
-            <div class="palette-item" data-type="entity">
-              <span class="palette-icon icon-entity"></span>
-              <span>Entity</span>
-            </div>
-            <div class="palette-item" data-type="weak-entity">
-              <span class="palette-icon icon-weak-entity"></span>
-              <span>Weak Entity</span>
-            </div>
-            <div class="palette-item" data-type="relationship">
-              <span class="palette-icon icon-relationship"></span>
-              <span>Relationship</span>
-            </div>
-            <div class="palette-item" data-type="attribute">
-              <span class="palette-icon icon-attribute"></span>
-              <span>Attribute</span>
-            </div>
-            <div class="palette-item" data-type="key-attribute">
-              <span class="palette-icon icon-key-attribute"></span>
-              <span>Key Attribute</span>
-            </div>
-            <div class="palette-item" data-type="multivalued-attribute">
-              <span class="palette-icon icon-multivalued"></span>
-              <span>Multivalued</span>
-            </div>
-            <div class="palette-item" data-type="derived-attribute">
-              <span class="palette-icon icon-derived"></span>
-              <span>Derived</span>
-            </div>
-            <div class="palette-item" data-type="isa">
-              <span class="palette-icon icon-isa"></span>
-              <span>ISA</span>
-            </div>
-          </div>
+          <div class="palette" id="palette"></div>
         </section>
 
         <section class="panel">
-          <div class="panel-title">
+          <div class="panel-head">
             <h2>Templates</h2>
-            <span>Instant starting points</span>
+            <p>Start from a worked example</p>
           </div>
           <div class="templates">
-            <button class="btn template-btn" data-template="library">Library System</button>
-            <button class="btn template-btn" data-template="ecommerce">E-Commerce Orders</button>
-            <button class="btn template-btn" data-template="university">University Enrollment</button>
+            <button class="template-btn" type="button" data-template="library">
+              <strong>Library system</strong>
+              <span>Books, authors, borrowers</span>
+            </button>
+            <button class="template-btn" type="button" data-template="ecommerce">
+              <strong>E-commerce orders</strong>
+              <span>Customers, orders, products</span>
+            </button>
+            <button class="template-btn" type="button" data-template="university">
+              <strong>University enrollment</strong>
+              <span>Students, courses, instructors</span>
+            </button>
           </div>
         </section>
       </aside>
 
-      <main class="canvas-wrap">
+      <main class="stage">
         <div id="canvas" class="canvas">
           <svg id="connections" class="connections" aria-hidden="true"></svg>
-          <div class="canvas-hint">
-            <strong>Drop elements here.</strong>
-            <span>Click to select, drag to move. Use Connect mode to draw relationships.</span>
+
+          <div class="empty-state" id="empty-state">
+            <h2>Start your diagram</h2>
+            <p>Drag a shape from the left, load a template, or let the AI sketch a first draft.</p>
+            <div class="empty-actions">
+              <button class="chip" type="button" data-template="library">Library system</button>
+              <button class="chip" type="button" data-template="ecommerce">E-commerce orders</button>
+              <button class="chip" type="button" data-template="university">University enrollment</button>
+            </div>
+            <button class="btn soft" type="button" id="empty-ai">
+              <svg class="ic"><use href="#i-sparkle" /></svg>
+              <span>Ask the AI to sketch one</span>
+            </button>
           </div>
+        </div>
+
+        <div class="dock" role="toolbar" aria-label="Canvas tools">
+          <div class="segmented" role="radiogroup" aria-label="Pointer mode">
+            <button id="mode-move" type="button" role="radio" aria-checked="true" class="seg active" title="Move and edit (V)">
+              <svg class="ic"><use href="#i-cursor" /></svg><span>Move</span>
+            </button>
+            <button id="connect-toggle" type="button" role="radio" aria-checked="false" class="seg" title="Connect two elements (C)">
+              <svg class="ic"><use href="#i-link" /></svg><span>Connect</span>
+            </button>
+          </div>
+          <span class="dock-sep"></span>
+          <button id="undo-btn" class="icon-btn" type="button" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>
+            <svg class="ic"><use href="#i-undo" /></svg>
+          </button>
+          <button id="redo-btn" class="icon-btn" type="button" title="Redo (Ctrl+Y)" aria-label="Redo" disabled>
+            <svg class="ic"><use href="#i-redo" /></svg>
+          </button>
+          <span class="dock-sep"></span>
+          <button id="clear-canvas" class="icon-btn danger-hover" type="button" title="Clear canvas" aria-label="Clear canvas">
+            <svg class="ic"><use href="#i-eraser" /></svg>
+          </button>
         </div>
       </main>
 
-      <aside class="sidebar right">
+      <aside class="rail right" aria-label="Properties">
         <section class="panel">
-          <div class="panel-title">
+          <div class="panel-head">
             <h2>Properties</h2>
-            <span>Selected element</span>
+            <p id="prop-summary">Nothing selected</p>
           </div>
-          <div class="prop-row">
-            <label for="prop-label">Label</label>
-            <input id="prop-label" type="text" placeholder="Select an element" />
+          <div class="field">
+            <label for="prop-label">Name</label>
+            <input id="prop-label" type="text" placeholder="Select an element" autocomplete="off" />
           </div>
-          <div class="prop-row">
-            <label>Type</label>
-            <div id="prop-type" class="prop-readonly">None</div>
+          <div class="field">
+            <span class="field-label">Type</span>
+            <div id="prop-type" class="type-pill">None</div>
           </div>
-          <div class="prop-row">
-            <button id="delete-selected" class="btn danger">Delete Selected</button>
+          <div class="field" id="prop-links-field" hidden>
+            <span class="field-label">Connected to</span>
+            <ul id="prop-links" class="link-list"></ul>
           </div>
+          <button id="delete-selected" class="btn danger block" type="button">
+            <svg class="ic"><use href="#i-trash" /></svg>
+            <span>Delete element</span>
+          </button>
         </section>
 
-        <section class="panel">
-          <div class="panel-title">
-            <h2>Tips</h2>
-            <span>Quick reminders</span>
+        <section class="panel shortcuts">
+          <div class="panel-head">
+            <h2>Shortcuts</h2>
           </div>
-          <ul class="tips">
-            <li>Toggle Connect to link two elements.</li>
-            <li>Click empty space to clear selection.</li>
-            <li>Templates wipe the canvas before loading.</li>
-          </ul>
+          <dl>
+            <div><dt>Rename</dt><dd>Double-click</dd></div>
+            <div><dt>Link</dt><dd>Drag from a dot</dd></div>
+            <div><dt>Delete</dt><dd><kbd>Del</kbd></dd></div>
+            <div><dt>Undo / redo</dt><dd><kbd>Ctrl</kbd> <kbd>Z</kbd> / <kbd>Y</kbd></dd></div>
+          </dl>
         </section>
       </aside>
+
+      <!-- AI assistant -->
+      <aside class="assistant" id="assistant" aria-label="AI assistant">
+        <header class="ai-head">
+          <div class="ai-title">
+            <span class="ai-badge"><svg class="ic"><use href="#i-sparkle" /></svg></span>
+            <div>
+              <h2>AI assistant</h2>
+              <p id="ai-context" class="ai-context"><span class="live-dot"></span><span id="ai-context-text">Watching your canvas</span></p>
+            </div>
+          </div>
+          <div class="ai-head-actions">
+            <button id="ai-new" class="icon-btn" type="button" title="New chat" aria-label="Start a new chat">
+              <svg class="ic"><use href="#i-refresh" /></svg>
+            </button>
+            <button id="ai-close" class="icon-btn" type="button" title="Close" aria-label="Close assistant">
+              <svg class="ic"><use href="#i-x" /></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="ai-scroll" id="ai-scroll">
+          <div id="ai-messages" class="ai-messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+        </div>
+
+        <form id="ai-form" class="composer" autocomplete="off">
+          <div id="ai-attachments" class="attachments" hidden></div>
+          <textarea id="ai-input" rows="1" placeholder="Ask about your diagram…" aria-label="Message the assistant"></textarea>
+          <div class="composer-bar">
+            <button id="ai-attach" class="icon-btn" type="button" title="Attach images" aria-label="Attach images">
+              <svg class="ic"><use href="#i-clip" /></svg>
+            </button>
+            <input id="ai-file" type="file" accept="image/*" multiple hidden />
+            <span class="composer-hint">Enter to send · Shift+Enter for a new line</span>
+            <button id="ai-send" class="send-btn" type="submit" aria-label="Send message" disabled>
+              <svg class="ic send"><use href="#i-send" /></svg>
+              <svg class="ic stop"><use href="#i-stop" /></svg>
+            </button>
+          </div>
+        </form>
+
+        <div class="drop-veil" id="ai-drop">Drop images to attach</div>
+      </aside>
     </div>
+
+    <button id="ai-fab" class="fab" type="button" aria-controls="assistant">
+      <svg class="ic"><use href="#i-sparkle" /></svg>
+      <span>Ask AI</span>
+    </button>
   </div>
 
-  <div id="context-menu" class="context-menu">
-    <div class="menu-item" id="menu-edit">Edit Name</div>
-    <div class="menu-item" id="menu-duplicate">Duplicate</div>
+  <div id="context-menu" class="context-menu" role="menu">
+    <div class="menu-item" id="menu-edit" role="menuitem">Rename</div>
+    <div class="menu-item" id="menu-duplicate" role="menuitem">Duplicate</div>
     <div class="divider"></div>
-    <div class="menu-item danger" id="menu-delete">Delete</div>
+    <div class="menu-item danger" id="menu-delete" role="menuitem">Delete</div>
   </div>
+
+  <dialog id="confirm-dialog" class="dialog">
+    <form method="dialog">
+      <h3 id="confirm-title">Are you sure?</h3>
+      <p id="confirm-message"></p>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel">Cancel</button>
+        <button class="btn primary" id="confirm-ok" value="ok">Continue</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="app.js"></script>
+  <script src="assistant.js"></script>
 </body>
 
 </html>

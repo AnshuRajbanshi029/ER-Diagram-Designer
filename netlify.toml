@@ -1,3 +1,6 @@
 [build]
   command = ""
   publish = "."
+
+# Chat proxy for the AI assistant: netlify/edge-functions/chat.js (served at /api/chat).
+# Set ANTHROPIC_API_KEY (and optionally ANTHROPIC_MODEL) in Site settings > Environment variables.
