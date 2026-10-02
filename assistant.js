@@ -316,6 +316,7 @@
   /* ---------- Welcome ---------- */
 
   function renderWelcome() {
+    listEl.querySelector('.ai-welcome')?.remove();
     if (messages.length) return;
     const s = snap();
     const sel = s.elements.find((e) => e.id === s.selectedId);
