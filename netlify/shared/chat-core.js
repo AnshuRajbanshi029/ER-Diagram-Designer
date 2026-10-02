@@ -2,7 +2,6 @@
 // local dev server (Node 18+), so it only uses web-standard APIs.
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const DEFAULT_BASE_URL = 'https://api.xkiro.com/v1';
 export const MODELS = [
   'qwen/qwen3.8-omni-flash:free',
   'qwen/qwen3.8-max:free',
@@ -15,6 +14,8 @@ const MAX_MESSAGES = 20;
 const MAX_IMAGES = 8;
 const MAX_TEXT_CHARS = 20000;
 const MAX_CONTEXT_CHARS = 30000;
+const RATE_LIMIT = 5; // requests per client per window
+const RATE_WINDOW_MS = 60 * 1000;
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
 const SYSTEM_PROMPT = `You are the AI assistant built into ER Diagram Designer, a browser-based editor for Chen-notation entity-relationship diagrams. The user is working on a diagram right now, side by side with this chat.
@@ -91,6 +92,23 @@ function normalizeMessages(input) {
   return out;
 }
 
+// In-memory sliding window. Edge instances don't share memory, so this is a second layer behind
+// the platform rate limit declared in netlify/edge-functions/chat.js.
+const hits = new Map();
+function retryAfterSeconds(key, now = Date.now()) {
+  const recent = (hits.get(key) || []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (recent.length >= RATE_LIMIT) {
+    hits.set(key, recent);
+    return Math.max(1, Math.ceil((recent[0] + RATE_WINDOW_MS - now) / 1000));
+  }
+  recent.push(now);
+  hits.set(key, recent);
+  if (hits.size > 5000) {
+    for (const [k, v] of hits) if (now - v[v.length - 1] >= RATE_WINDOW_MS) hits.delete(k);
+  }
+  return 0;
+}
+
 // Convert our normalized messages into OpenAI chat-completions messages.
 function toOpenAI(system, messages) {
   const out = [{ role: 'system', content: system }];
@@ -144,10 +162,10 @@ function normalizeStream(body) {
 
 /**
  * env: { apiKey, baseUrl, model, provider }
- *   provider 'openai' (default): any OpenAI-compatible /chat/completions endpoint (baseUrl).
+ *   provider 'openai' (default): any OpenAI-compatible /chat/completions endpoint (baseUrl, required).
  *   provider 'anthropic': Anthropic Messages API.
  */
-export async function handleChat(request, { apiKey, baseUrl, model, provider = 'openai', fetchImpl = fetch } = {}) {
+export async function handleChat(request, { apiKey, baseUrl, model, provider = 'openai', clientIp = 'unknown', fetchImpl = fetch } = {}) {
   if (request.method !== 'POST') return json(405, { error: 'Use POST.' });
 
   // Same-origin only, so other sites cannot spend this deployment's API key from a browser.
@@ -156,9 +174,17 @@ export async function handleChat(request, { apiKey, baseUrl, model, provider = '
     return json(403, { error: 'Cross-origin requests are not allowed.' });
   }
 
-  if (!apiKey) {
+  const wait = retryAfterSeconds(clientIp);
+  if (wait) {
+    return new Response(JSON.stringify({ error: `Slow down: the assistant allows ${RATE_LIMIT} messages per minute. Try again in ${wait}s.` }), {
+      status: 429,
+      headers: { 'content-type': 'application/json', 'retry-after': String(wait), 'cache-control': 'no-store' },
+    });
+  }
+
+  if (!apiKey || (provider === 'openai' && !baseUrl)) {
     return json(503, {
-      error: 'The AI assistant is not set up yet. Add an AI_API_KEY environment variable and redeploy.',
+      error: 'The AI assistant is not set up yet. Set the AI_API_KEY and AI_BASE_URL environment variables and redeploy.',
     });
   }
 
@@ -188,7 +214,7 @@ export async function handleChat(request, { apiKey, baseUrl, model, provider = '
         signal: request.signal,
       });
     } else {
-      upstream = await fetchImpl(`${(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}/chat/completions`, {
+      upstream = await fetchImpl(`${baseUrl.replace(/\/+$/, '')}/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({ model: chosen, max_tokens: 2048, stream: true, messages: toOpenAI(system, messages) }),

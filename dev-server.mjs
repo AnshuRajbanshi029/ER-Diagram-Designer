@@ -1,5 +1,5 @@
 // Local dev server: serves the static app and the same /api/chat handler used on Netlify.
-//   AI_API_KEY=... node dev-server.mjs
+//   AI_API_KEY=... AI_BASE_URL=... node dev-server.mjs
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
@@ -43,6 +43,7 @@ http.createServer(async (req, res) => {
       provider: process.env.AI_PROVIDER === 'anthropic' ? 'anthropic' : 'openai',
       apiKey: process.env.AI_PROVIDER === 'anthropic' ? process.env.ANTHROPIC_API_KEY : process.env.AI_API_KEY,
       baseUrl: process.env.AI_BASE_URL,
+      clientIp: req.socket.remoteAddress,
       model: process.env.AI_MODEL,
     });
     res.writeHead(response.status, Object.fromEntries(response.headers));

@@ -6,27 +6,37 @@ Browser-based Chen-notation ER diagram editor with a streaming AI assistant that
 
 | Variable | Purpose |
 | --- | --- |
-| `AI_API_KEY` | API key for the OpenAI-compatible provider (required) |
-| `AI_BASE_URL` | Defaults to `https://api.xkiro.com/v1` |
-| `AI_MODEL` | Fallback model, defaults to `qwen/qwen3.8-omni-flash:free` |
+| `AI_API_KEY` | API key for the OpenAI-compatible provider (required, keep secret) |
+| `AI_BASE_URL` | Provider base URL (required, keep secret) |
+| `AI_MODEL` | Optional fallback model, defaults to `qwen/qwen3.8-omni-flash:free` |
 | `AI_PROVIDER` | Set to `anthropic` to use the Anthropic API with `ANTHROPIC_API_KEY` instead |
 
-The chat panel's model picker offers the four allowed models in `netlify/shared/chat-core.js`.
+The chat panel's model picker offers the four allowed models listed in `netlify/shared/chat-core.js`.
 
 ## Run locally
 
 ```bash
-AI_API_KEY=... node dev-server.mjs   # http://localhost:8899
+AI_API_KEY=... AI_BASE_URL=... node dev-server.mjs   # http://localhost:8888
 ```
 
-Or put the variables in a git-ignored `.env` file. Without a key the editor works and the assistant explains that it isn't set up.
+Or put the variables in a git-ignored `.env` file. Without them the editor works and the assistant explains that it isn't set up.
 
-## Deploy (Netlify)
+## Deploy (Netlify CLI)
 
-1. Site settings → Environment variables → add `AI_API_KEY`.
-2. Redeploy. The Edge Function in `netlify/edge-functions/chat.js` serves `/api/chat` and streams the response.
+```bash
+npm i -g netlify-cli
+netlify login
+netlify link                      # or: netlify init
+netlify env:set AI_API_KEY  "<your key>"  --secret
+netlify env:set AI_BASE_URL "<base url>"  --secret
+netlify deploy --prod
+```
 
-The key never reaches the browser. The endpoint only accepts same-origin requests, but it has no per-user rate limit, so add one before sharing a public link widely.
+## Security
+
+- The key and base URL live only in Netlify environment variables and are read by the Edge Function (`/api/chat`). They are never sent to the browser or stored in the repo.
+- Rate limit: 5 requests per minute per IP, enforced by Netlify (`rateLimit` in `netlify/edge-functions/chat.js`) and again in code. Over the limit returns HTTP 429.
+- Same-origin requests only, an allowlist of models, and capped message and image sizes.
 
 ## How the assistant sees your work
 
