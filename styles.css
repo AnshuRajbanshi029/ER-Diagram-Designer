@@ -1676,8 +1676,7 @@ kbd {
 }
 
 @media (max-width: 760px) {
-  .brand-text p,
-  #ai-toggle span {
+  .brand-text p {
     display: none;
   }
 
@@ -1686,13 +1685,9 @@ kbd {
     white-space: nowrap;
   }
 
-  #ai-toggle {
-    width: 38px;
-    padding: 0;
-  }
-
   .fab {
-    display: none;
+    bottom: 84px;
+    right: 14px;
   }
 
   .workspace,

@@ -1,11 +1,9 @@
 (() => {
   const app = document.getElementById('app');
   const panel = document.getElementById('assistant');
-  const aiToggle = document.getElementById('ai-toggle');
   const fab = document.getElementById('ai-fab');
   const closeBtn = document.getElementById('ai-close');
   const newBtn = document.getElementById('ai-new');
-  const emptyAi = document.getElementById('empty-ai');
   const scrollEl = document.getElementById('ai-scroll');
   const listEl = document.getElementById('ai-messages');
   const form = document.getElementById('ai-form');
@@ -722,8 +720,7 @@
 
   function setOpen(open) {
     app.dataset.ai = open ? 'open' : 'closed';
-    aiToggle.setAttribute('aria-expanded', String(open));
-    aiToggle.classList.toggle('active', open);
+    fab.setAttribute('aria-expanded', String(open));
     if (open) {
       renderWelcome();
       updateChip();
@@ -732,19 +729,8 @@
     }
   }
 
-  aiToggle.addEventListener('click', () => setOpen(app.dataset.ai !== 'open'));
   fab.addEventListener('click', () => setOpen(true));
   closeBtn.addEventListener('click', () => setOpen(false));
-  emptyAi.addEventListener('click', () => {
-    setOpen(true);
-    if (!input.value) {
-      input.value = 'Design an ER diagram for a ';
-      autosize();
-      syncSend();
-      input.setSelectionRange(input.value.length, input.value.length);
-    }
-  });
-
   newBtn.addEventListener('click', () => {
     controller?.abort();
     messages.splice(0).forEach((m) => m.el.remove());
